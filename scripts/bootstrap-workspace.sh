@@ -58,10 +58,16 @@ if [[ ! -e "$INT/node_modules" ]]; then
   pwsh -NoProfile -Command "New-Item -ItemType Junction -Path '$INT/node_modules' -Target '$INSTALLED/node_modules' | Out-Null"
 fi
 if [[ $SKIP_DEPS -eq 0 && ! -d "$UP/node_modules/vitest" ]]; then
-  # vitest.upstream.config.mjs loads vitest from the upstream clone.
-  (cd "$UP" && pnpm install --frozen-lockfile) ||
+  # vitest.upstream.config.mjs loads vitest from the upstream clone. --ignore-scripts:
+  # upstream's prepare script installs its own git hooks (lint/typecheck on commit/push),
+  # which would block commits and pushes of local/zh.
+  (cd "$UP" && pnpm install --frozen-lockfile --ignore-scripts) ||
     echo "WARNING: pnpm install failed; the upstream suite is unavailable until fixed."
 fi
+# Hooks are shared by all worktrees; point them at an empty dir so upstream hooks never run.
+HOOKS="$(git -C "$UP" rev-parse --path-format=absolute --git-common-dir)/no-hooks"
+mkdir -p "$HOOKS"
+git -C "$UP" config core.hooksPath "$HOOKS"
 mkdir -p R:/Temp
 
 step "4/5 state"
