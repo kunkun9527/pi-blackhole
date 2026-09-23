@@ -4,18 +4,20 @@
 
 `/blackhole` replaces Pi's LLM-based `/compact` with an algorithmic structural summary — fast, zero-cost. Three background workers (Observer, Reflector, Dropper) capture durable facts and decisions that survive across compactions. Per-worker model fallback chains with persisted cooldowns. Manual flush mode. One JSON file to configure it all.
 
+> [!NOTE]
+> **Community Fork Notice**: This repository is a community-maintained fork of [`k0valik/pi-blackhole`](https://github.com/k0valik/pi-blackhole) by [@k0valik](https://github.com/k0valik), tracking upstream `dev` (baseline v0.5.8+). All core architectural design and implementation belong to the original author. This fork introduces targeted enhancements for **CJK (Chinese/Japanese/Korean) multilingual precision**, **FIFO long-session memory durability**, and **defensive context safety**.  
+> **关于本 Fork**：本仓库基于原版 [`k0valik/pi-blackhole`](https://github.com/k0valik/pi-blackhole) 维护，核心架构归原作者所有。在保持与上游完全兼容的前提下，重点增强了 **CJK 多语言精度**、**长会话 FIFO 记忆完整性** 与 **上下文防御性预算安全**。
+
 ---
 
 ## Install
 
 ```bash
-# From GitHub fork (with CJK & Long-Session Enhancements)
-# Requires npmCommand to be set in settings.json, otherwise pi runs
-# `npm install --omit=dev`, devDependencies are skipped, and dist/ is not built.
-# Example: "npmCommand": ["npm"] in ~/.pi/agent/settings.json
+# Install this fork (with CJK & Long-Session Enhancements)
+# Note: Requires npmCommand in ~/.pi/agent/settings.json, e.g.: "npmCommand": ["npm"]
 pi install git:github.com/kunkun9527/pi-blackhole
 
-# Or original upstream from npm
+# Or install official upstream release from npm
 pi install npm:pi-blackhole
 ```
 
@@ -32,48 +34,46 @@ Then `/reload` or restart Pi. The config file at `~/.pi/agent/pi-blackhole/pi-bl
 
 ---
 
-## Fork Enhancements / 本 Fork 更新与增强
+## Fork Enhancements at a Glance / 特性概览
 
-This fork builds on [`k0valik/pi-blackhole`](https://github.com/k0valik/pi-blackhole) (baseline v0.5.8+) with key architectural enhancements for **CJK support**, **long-session memory durability**, and **context safety**:
-本仓库基于原版 [`k0valik/pi-blackhole`](https://github.com/k0valik/pi-blackhole)（基线 v0.5.8+），针对 **CJK 中文支持**、**长会话记忆完整性** 以及 **上下文预算安全** 进行了深度优化与重构：
+This edition tracks upstream `dev` (baseline v0.5.8+) while hardening key areas for long engineering runs and non-English environments:
 
-### 1. CJK / Chinese Support & Enhancement (中文深度兼容与增强)
-- **Accurate CJK token estimation / Token 精准估算**
-  - **EN**: Uses a conservative ~1.5 tokens/char ratio for CJK characters (upstream assumed ~1 token/char), preventing hard context overflow caused by token underestimation before compaction triggers.
-  - **ZH**: 针对 CJK 字符采用约 1.5 token/字更保守合理的估算规则（原版约 1 token/字严重偏低），消除中文长文本因低估 token 在压缩前挤爆硬上下文上限的隐患。
-- **Intl segmenter & bi-gram recall / 语义分词与检索**
-  - **EN**: Integrates native `Intl.Segmenter` and bi-gram indexing into `recall` search for robust CJK keyword discovery and context snippet location; aligns punctuation splitting with CJK conventions.
-  - **ZH**: `recall` 检索全面集成原生 `Intl.Segmenter` 分词与双字（bi-gram）索引，支持中文关键词搜索与上下文定位；长句按中文标点习惯合理断句截断。
-- **Compound preference & directive parsing / 偏好与指令精确提取**
-  - **EN**: Correctly parses conditional ("如果…") and negative ("不要…") clauses in multi-statement Chinese directives without truncation or lost directives.
-  - **ZH**: 优化中文条件句与否定句提取逻辑，复合语句拆分解析，避免多条中文偏好与要求被粗暴截断或漏判。
-- **Fine-grained task goal tracking / 任务目标状态识别**
-  - **EN**: Accurately recognizes Chinese status transitions ("已修复", "仍然报错") and isolates sub-issues to prevent clearing active blockers when resolving unrelated goals.
-  - **ZH**: 精准识别中文任务状态变迁（「已修复」、「仍然报错」等），独立追踪多个子问题，杜绝解决单个问题时误连带清除其他失败问题。
+| Capability / 核心能力 | Upstream Baseline / 上游原版 | This Fork (CJK & Long-Session Edition) / 本 Fork 增强 |
+|---|---|---|
+| **CJK Token Accounting** | Uniform ~1 token/char heuristic | Conservative Unicode model (~1.5 tokens/char, 4 for non-BMP) to prevent context exhaustion |
+| **Search & Recall** | Space-delimited token matching | Native `Intl.Segmenter` + bi-gram indexing for Asian text; 12,000 token response ceiling |
+| **Observer Backlog** | Newest-first single-chunk slice | Chronological FIFO queue draining (`drain=true`) with atomic input budgeting (`src/om/input-budget.ts`) |
+| **Record Deduplication** | Fuzzy Levenshtein / SimHash clustering | Strict exact-match deduplication to preserve similar code blocks and fine-grained CJK directives |
+| **Pi 0.87+ Lifecycle** | Native `agentContext` & `createTurnCap` | Extended with `midRunCompaction: "resume"` for smooth inline tool execution loops |
 
-### 2. Memory Durability & FIFO Backlog Draining (记忆完整性保障与排空机制)
-- **Eliminate backlog drops in long runs / 解决长任务旧记忆丢失问题**
-  - **EN**: Upstream Observer silently discarded older conversation backlogs when exceeding a single chunk (e.g. 50k tokens), permanently losing early decisions and debugging insights in heavy tool-call sessions.
-  - **ZH**: 原版 Observer 在积压消息超出单次窗口（如 50k tokens）时会直接丢弃早期积压内容跳到末尾，导致长任务前中期的关键决策与代码排查记录永久丢失。
-- **FIFO auto-draining & atomic budget / FIFO 自动排空与原子预算**
-  - **EN**: Reimplemented backlog draining in oldest-first (FIFO) order (`drain=true`), processing multiple batches until fully caught up. Integrated atomic input budgeting (`src/om/input-budget.ts`) so model errors or limits roll back cleanly without memory gaps or phantom progress.
-  - **ZH**: 重构为从旧到新（FIFO）分批处理未观察积压（`drain=true`），多轮排空直到追齐最新进度；引入原子输入预算保护（`src/om/input-budget.ts`），模型超限或异常时原子回滚，不造成记忆空洞或虚假推进。
+<details>
+<summary><b>Technical Highlights & Implementation Details / 技术实现细节（点击展开）</b></summary>
 
-### 3. Exact-only Deduplication (精确去重)
-- **EN**: Replaced fuzzy Levenshtein clustering with exact-only key matching for session records. Prevents similar code blocks or semantically near Chinese phrases from being erroneously merged or dropped.
-- **ZH**: 移除原版模糊编辑距离聚类合并，仅对完全相同的原文进行去重。杜绝相似代码片段或语义接近的中文记录被算法误合并、误删。
+### 1. CJK & Multilingual Precision (中文与多语言深度优化)
+- **Conservative Token Accounting**: Estimates CJK characters at ~1.5 tokens/char and non-BMP symbols at 4 tokens. Eliminates the risk of long non-English sessions silently exhausting hard context limits prior to compaction triggering.  
+  *(针对 CJK 字符采用约 1.5 token/字更保守合理的估算规则，消除中文长文本因低估 token 在压缩前挤爆硬上下文上限的隐患)*
+- **Native Semantic Tokenization**: Integrates native `Intl.Segmenter` and bi-gram indexing into `recall` search for accurate keyword discovery and context snippet location without external binary dependencies.  
+  *(`recall` 检索集成原生 `Intl.Segmenter` 分词与双字索引，支持中文关键词搜索与上下文定位，标点断句贴合中文习惯)*
+- **Directive & Goal Tracking**: Robustly parses multi-clause Chinese instructions, conditional rules ("如果..."), and negative constraints ("不要..."), accurately recognizing status transitions ("已修复", "仍然报错") to isolate independent sub-goals.  
+  *(精确解析中文复合指令、条件句与否定句；独立追踪子目标状态变迁，防止清除未决问题)*
 
-### 4. Dual Recall Budget Protection (Recall 响应双重预算拦截)
-- **EN**: Implemented dual character and token caps (`DEFAULT_RECALL_RESPONSE_MAX_TOKENS = 12000`) on `recall` tool outputs, ensuring entry expansions (`#N:text` / `#N:path`) cannot flood or exhaust the agent context window.
-- **ZH**: 引入字符与 token 双重响应上限（`DEFAULT_RECALL_RESPONSE_MAX_TOKENS = 12000`），保证检索展开（`#N:text` / `#N:path`）不会一次性塞爆当前上下文窗口。
+### 2. Long-Session Memory Durability (长会话记忆完整性保障)
+- **FIFO Chronological Draining**: When observer backlog exceeds a single chunk (e.g. 50k tokens), processes unobserved entries in chronological order (`drain=true`) until fully caught up, ensuring early architectural decisions and debugging insights are preserved during extended multi-tool sessions.  
+  *(重构为从旧到新 FIFO 分批处理积压，多轮连续排空直至追齐进度，保障长任务早期关键决策与排查记录完整留存)*
+- **Atomic Input Budgeting**: Introduces atomic request budgeting (`src/om/input-budget.ts`). Pre-flights model input limits and cleanly rolls back state on provider aborts or stream errors, preventing phantom coverage advances.  
+  *(引入原子输入预算保护，在异常或超限时原子回滚，不造成记忆空洞或虚假推进)*
 
-### 5. Pi 0.87+ Deep Compatibility (Pi 0.87+ 深度适配)
-- **EN**: Fully compatible with Pi 0.87's `agentContext` and `finishTurn` lifecycle. Supports inline mid-run compaction (`midRunCompaction: "resume"`) during extended tool loops without interrupting active executions.
-- **ZH**: 支持 Pi 0.87 的 `agentContext` 与 `finishTurn` 控制；支持中途压缩平滑继续（`midRunCompaction: "resume"`），避免长任务连续工具调用中途上下文溢出退出。
+### 3. Defensive Context Safety (上下文防御性加固)
+- **Dual Recall Ceilings**: Enforces both character and estimated token caps (`DEFAULT_RECALL_RESPONSE_MAX_TOKENS = 12000`) on `#N:text` and `#N:path` drill-downs, guaranteeing that inspecting large files or logs cannot flood the active conversation window.  
+  *(引入字符与 12,000 tokens 双重响应上限，保证检索展开不会一次性撑爆上下文窗口)*
+- **Exact Identity Matching**: Employs strict identity matching for session records rather than fuzzy clustering, protecting subtle code variations and precise phrasing from accidental merge or deletion.  
+  *(仅对完全相同的原文进行去重，杜绝相似代码片段或语义接近的记录被算法误合并、误删)*
 
 > **Detailed Specifications / 详细技术规范**:  
 > See [**`docs/LOCAL-DIVERGENCE.md`**](docs/LOCAL-DIVERGENCE.md) for the complete list of 12 divergence items and merge rules, and [**`LOCAL-MAINTENANCE.md`**](LOCAL-MAINTENANCE.md) for the sync and maintenance workflow.  
 > 完整技术实现与维护规则请参阅 [**`docs/LOCAL-DIVERGENCE.md`**](docs/LOCAL-DIVERGENCE.md) 与 [**`LOCAL-MAINTENANCE.md`**](LOCAL-MAINTENANCE.md)。
+
+</details>
 ---
 
 ## What it does
