@@ -1,57 +1,58 @@
-# 本地 Blackhole：开发版整合与 pi 0.87 适配
+# 本地 Blackhole 维护手册
 
-## 当前基线
+`pi-blackhole-local` 是上游 `k0valik/pi-blackhole` dev 分支加本地补丁的版本。本地补丁以中文支持为核心，并附带几项记忆完整性和 recall 预算增强。
 
-- 版本：`0.5.8-dev.a00bf11.local.1`。
-- 上游：`https://github.com/k0valik/pi-blackhole.git`，`dev`，`a00bf1144391d49661d96c1a26578ad91f2e6523`（含 v0.5.7、v0.5.8 及其后 git-status 修复）。
-- 原版仓库：`R:/pi-blackhole-upstream`（dev 分支，无本地源码补丁）。
-- 整合工作树：`R:/pi-blackhole-integration`，分支 `local/b4e0591-zh`：先提交本地补丁，再 `git merge origin/dev`。后续同步继续在此分支 merge，基线由 git 自动追踪。
-- 实际安装：`C:/Users/Su/.pi/agent/local-packages/pi-blackhole-local`；settings 中仍只启用这个来源。
-- 入口仍是 `index.ts`（上游 0.5.8 改为 `dist/index.js` 预构建入口，本地不采用，不依赖 `dist/`）。运行依赖链接全局 pi 0.87.x；升级宿主前重新验收。
+**所有与上游的行为差异、实现位置、不变量和合并规则都在 [`docs/LOCAL-DIVERGENCE.md`](docs/LOCAL-DIVERGENCE.md)。** 同步上游、解决冲突、修改差异相关文件、判断上游测试失败之前，先读它。
 
-## 本次合入（b4e0591 → a00bf11）
+## 位置与基线
 
-- 直接采用上游：`src/om/agents/agent-context.ts`（用宿主 `createInitialSystemMessage` + `toToolDeclaration` 构造首条 system 消息，并按能力兼容 ≤0.86）；`src/om/agents/turn-cap.ts`（同时提供 `shouldStopAfterTurn` 与 `finishTurn`，替代本地 `turn-limit.ts`，已删除）；provider stream 绑定 `this`；`pi.on.bind(pi)`；git 子进程清理 `GIT_DIR` 等仓库定位变量；`cosmetic-output` 的 `isObject` 守卫（替代本地 `unknown` 写法）；memory 命令在 manual 模式显示 branch + pending 池。
-- 按本地策略改写：上游新增的 `observationPoolTokens()`（dropper 触发、状态栏、memory 命令共用）改为按 `content` 用 `estimateStringTokens` 重算，不信任已存 `tokenCount`；dropper 候选 token 仍优先使用分批 `batchPressure`。
-- 未采用：`package.json` 的 dist 入口、pnpm 版本及 dependabot 等发布工具链变更。
+| 项目 | 值 |
+|---|---|
+| 当前版本 | `0.5.8-dev.a00bf11.local.1` |
+| 上游基线 | dev `a00bf1144391d49661d96c1a26578ad91f2e6523`（记录在 `package.json` 的 `blackholeUpstream.commit`） |
+| 原版仓库 | `R:/pi-blackhole-upstream`，只做 fast-forward，不放本地改动 |
+| 整合树 | `R:/pi-blackhole-integration`，分支 `local/zh`（本地补丁提交在此，定期 `merge origin/dev`） |
+| 实际安装 | `C:/Users/Su/.pi/agent/local-packages/pi-blackhole-local`（无 git，靠 `deployment-manifest.json` 追踪） |
+| 已部署的整合提交 | 安装目录 `deployment-manifest.json` 的 `integrationCommit` |
+| 用户配置 | `C:/Users/Su/.pi/agent/pi-blackhole/pi-blackhole-config.json`（不属于代码，升级时不改） |
 
-## 更早合入（b4e0591 及之前）
+安装目录不包含：`upstream-tests/`、`src/**/*.test.ts`、`.github/`、pnpm 与 lint 配置、`work_docs/`。这些只在整合树里。
 
-开发分支的文件修改归因（包括锚点编辑、bash）、Git 状态和提交识别、文件列表及摘要跨轮合并、CJK 分词检索、中文标点裁剪、observer 先前记忆上限、live status bar、压缩前输出保留、内存子会话 turn_end 压缩、createRequire 启动器宿主发现，以及 pi 0.87 compact helper 识别均已合入。
+## 同步上游流程
 
-`src/om/inline-compaction.ts` 使用上游 dev 的完整实现，替代此前本地临时补丁。上游只检查 own prototype helper，因此隔离测试复制真实宿主的 prototype descriptors，而不再用空子类模拟同一宿主。
+每步以括号内条件为完成标志。
 
-pi 0.87 适配：
-- 官方参考：https://pi.dev/news/releases/0.87.0 。压缩继续通过宿主 compact 写入 SessionManager，不以单独覆盖 agent.state.messages 代替会话历史；`context` hook 只处理非 system 消息，系统提示与工具声明交由新版宿主恢复。
-- 三个 worker 的轮数上限与 system prompt 载体已改用上游实现（见上）；error/aborted 仍不计轮数，真实离线 Agent 循环覆盖轮数限制及不提交部分结果。
-- 新 status bar、memory command 的活动池用内容重新估算，保持与本地预算一致；UI-only `blackhole-pre-compaction-output` 不计入观察源压力。
+1. **更新原版仓库**：`cd R:/pi-blackhole-upstream && git fetch --all --tags --prune && git switch dev && git merge --ff-only origin/dev`（`git log -1` 为上游最新提交）。
+2. **查看上游改了什么**：`git log --oneline <旧基线>..origin/dev` 与 `git diff --stat <旧基线> origin/dev -- src index.ts`，对照 `docs/LOCAL-DIVERGENCE.md` 的「文件 → 差异索引」标出会碰到本地差异的文件（每个被改动的 `src` 文件都已归类为「无本地差异」或具体 D 编号）。
+3. **合并**：`cd R:/pi-blackhole-integration && git fetch origin && git merge --no-ff --no-commit origin/dev`（出现冲突列表）。
+4. **解决冲突**（无剩余冲突标记，`git diff --check` 干净）：
+   - `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml` 取本地版本，再手工吸收上游有意义的依赖变化。
+   - 源码冲突按 `docs/LOCAL-DIVERGENCE.md` 对应条目的「不变量」和「合并注意」处理：保留本地不变量，吸收上游与之正交的改动。上游修好了本地补丁针对的问题时，可以改用上游实现，并把该条目移到「已回归上游」。
+   - 上游新增在 `tests/` 的文件移到 `upstream-tests/`（`git mv`）；本地 `tests/` 只放本地 bun 测试。
+   - 上游新增的 `tokenCount` 求和、从新到旧的截断、部分结果提交，都属于 D2/D3/D4 的回归，必须按本地规则改写。
+5. **验证**（全部通过或失败只落在已知清单）：
+   - `node node_modules/typescript/bin/tsc --noEmit`
+   - `bun test ./tests/`（不要用 `bun test tests`，会匹配到上游 vitest 文件）
+   - `node scripts/smoke-host.mjs`、`bun scripts/probe-inline-host.ts`
+   - 上游全量：`node R:/pi-blackhole-upstream/node_modules/vitest/vitest.mjs run -c vitest.upstream.config.mjs --reporter=json --outputFile=R:/Temp/blackhole-upstream-<commit>.json`。失败必须能在 `UPSTREAM-MERGE-REPORT.md` 的已知清单或 `docs/LOCAL-DIVERGENCE.md` 的「上游预期失败」里找到；新增失败要么修代码，要么（仅限本地策略导致的）登记原因。
+6. **更新记录**（三处一致）：`package.json` 的 `version` 与 `blackholeUpstream.commit`；`UPSTREAM-MERGE-REPORT.md` 写本次上游变更处理表和测试结果；`docs/LOCAL-DIVERGENCE.md` 同步增删差异条目、行数统计和基线 commit。
+7. **提交**：`git add -A -- . ':!node_modules' ':!.codeindex' && git commit`（`git status` 干净）。
+8. **部署**：`python scripts/deploy-local.py --base <manifest 中的 integrationCommit>` 先看计划和漂移；`drift: none` 后加 `--apply`（打印 `backup:` 路径和 `deployed N files`）。脚本会先整包备份到 `C:/Users/Su/.pi/agent/backups/blackhole-deploy-<commit>-<时间>/`，确认 settings 和 Blackhole 配置未被改动，并更新 manifest。
+9. **安装目录复验**：在安装目录 `bun run check`（71+ 项通过、加载器与 inline 探针通过），然后完全重启 pi（`/reload` 可能保留旧的 inline registry）。
 
-## 必须保留的本地行为
+若第 8 步报漂移，说明有人直接改了安装目录：先把漂移内容整理进整合树并提交，再部署。
 
-1. **无损身份判断**：删除或合并事实只允许完整原文相同；中文分词、规范化、相似度仅用于检索排序。`C#` / `C++`、大小写、路径分隔符、否定范围和长文本末尾不被模糊合并。
-2. **中文约束**：保留否定及条件作用域；语言偏好只替换独立语言指令，不丢弃同句的其他要求；已解决状态只清理相同主题，不能遮住另一分句的失败。合入上游明确更正指令和完整窗口错误重试识别。
-3. **recall 双预算**：字符与 token 上限独立，任一为 0 只关闭对应限制。分页、展开、drill-down、错误和页眉都计入；`:full` 不绕过限制，原文不删除。
-4. **预算不是 tokenizer 保证**：成功 assistant usage 优先；其余使用本地保守 Unicode 启发式，基本 CJK 约 1.5 token/字，ASCII 约 4 字/token。旧记忆 tokenCount 不可信，按内容重算，不改写旧记录。
-5. **连续源覆盖**：observer 从旧到新处理连续前缀并排空积压；完整提示词含 system、工具 schema、消息包装、输出余量。单条超限保留原文、报错且不推进游标。reflector/dropper 全候选分批，所有批次成功才提交；dropper 有全局上限。保留每轮请求预算复查。
-6. **现有集成**：RPC 简短显示与 details 中完整摘要恢复、recall 折叠显示装饰保留。
+## 验收范围
 
-本地配置和历史会话不由此次代码升级迁移或重写。新状态栏遵循上游 `statusBar: true` 默认值，可通过 Blackhole 设置关闭；新增配置说明见 docs/CONFIG.md。
+- 本地 `tests/` 覆盖中文提取、预算、分批、RPC 摘要、pi 0.87 真实 agentLoop 与 inline 宿主；测试不调用远程模型。
+- 未覆盖：付费模型端到端质量、真实长会话压缩效果、历史记忆重建。大改动后在真实会话里跑一次长任务并看 `/blackhole-memory`。
+- 调试日志：配置 `debugLog: true` 后写入 `C:/Users/Su/.pi/agent/pi-blackhole/debug.ndjson`。
 
-## 验收
+## 回退
 
-在实际安装目录运行 `bun run check`：strict 类型检查（含本地测试）、本地回归、pi 真实加载器、inline 宿主探针。测试不调用远程模型。`tests/agent-transcript-087.test.ts` 用真实 pi agentLoop 和离线 provider stream 验证三种 worker 的 system 指令和工具声明确实进入请求。
+1. 退出 pi。
+2. 从部署时打印的备份目录（或 manifest 的 `backup` 字段）把代码、`package.json`、脚本恢复到安装目录；保留安装目录的 `node_modules` 联接，不整份还原 settings 和用户配置。
+3. manifest 中 `new: true` 的文件是新版才有的，删除前另行确认。
+4. 重启 pi，并在安装目录运行 `bun run check`。
 
-上游测试单独保留在 R 盘整合树 `upstream-tests/`，由 `vitest.upstream.config.mjs` 执行；不要用 `bun test tests`，它会把名字包含 tests 的上游 Vitest 测试也匹配进去。使用 `bun test ./tests/`。
-
-上游 suite 有针对 Windows、0.87 消息格式、测试会话 parentId 链和本地策略的有限测试适配。原版 suite 仍可在原版仓库查看。完整结果及失败分类见 `UPSTREAM-MERGE-REPORT.md` 和 R 盘验证产物。不能将重点测试通过表述为整个上游 suite 全绿。
-
-未执行：付费 provider 端到端质量评测、用户真实长会话压缩、历史观察重建。重新启动 pi 后再验证交互运行；仅 /reload 可能保留旧 inline registry。
-
-## 备份与回退
-
-升级前完整源码备份（不含 node_modules、dist）：
-`C:/Users/Su/.pi/agent/backups/blackhole-a00bf11-merge-20260923-162508/package`（本次，local.4 状态）；更早：`C:/Users/Su/.pi/agent/backups/blackhole-dev-merge-20260921-235824/package`。
-
-如需回退，先退出 pi，将该备份中的代码、package.json 和本地维护脚本恢复到实际安装目录；保留当前 node_modules 目录联接及用户配置，不整份还原 settings。用此次 `deployment-manifest.json` 中的新增文件清单识别仅新版存在的文件，删除前另行确认。恢复旧入口后新文件不会被加载；重启 pi。
-
-后续同步：在 R 盘整合树 `local/b4e0591-zh` 分支 `git fetch origin && git merge origin/dev`，通过本地中文/预算/Agent transcript 测试、宿主探针和上游 suite 后再部署。不要用上游的整目录覆盖替代三方合并。
+历史备份：`backups/blackhole-a00bf11-merge-20260923-162508`（a00bf11 合并前，local.4）、`backups/blackhole-dev-merge-20260921-235824`（b4e0591 合并前）。
