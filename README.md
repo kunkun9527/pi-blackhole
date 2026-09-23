@@ -9,14 +9,14 @@
 ## Install
 
 ```bash
-# From npm (recommended)
-pi install npm:pi-blackhole
-
-# Or directly from GitHub.
+# From GitHub fork (with CJK & Long-Session Enhancements)
 # Requires npmCommand to be set in settings.json, otherwise pi runs
 # `npm install --omit=dev`, devDependencies are skipped, and dist/ is not built.
 # Example: "npmCommand": ["npm"] in ~/.pi/agent/settings.json
-pi install git:github.com/k0valik/pi-blackhole
+pi install git:github.com/kunkun9527/pi-blackhole
+
+# Or original upstream from npm
+pi install npm:pi-blackhole
 ```
 
 If you have standalone `pi-vcc` or `pi-observational-memory` installed, remove them first — they conflict and will prevent blackhole from loading:
@@ -32,17 +32,30 @@ Then `/reload` or restart Pi. The config file at `~/.pi/agent/pi-blackhole/pi-bl
 
 ---
 
-## ✨ What's new
+## 本 Fork 更新与增强 / Fork Enhancements
 
-> **Latest release: [0.5.8](CHANGELOG.md)**
->
-> - **Pi loads a prebuilt bundle** — `pi.extensions` points at the tsup `dist/index.js` instead of TypeScript source, cutting startup import time (500–570 ms → 350–530 ms). Registry installs ship `dist/`; git installs need `npmCommand` set, and a missing `dist/` now warns instead of failing silently.
-> - **Every observation-pool readout agrees** — the dropper trigger, `/blackhole-memory` pool lines, and the footer P gauge each summed the pool inline; they now share one helper, and `/blackhole-memory` includes (and labels) manual-mode pending batches so the display matches what the trigger gates on. No threshold or candidate behavior changes. ([#120](https://github.com/k0valik/pi-blackhole/issues/120))
-> - **`agentMaxTurns` is enforced on Pi 0.87** — the worker loops emitted only the removed `shouldStopAfterTurn`, so the turn budget was silently ignored; `createTurnCap` now emits both that hook and 0.87's `finishTurn`, with independent counters. ([upstream OM `#83`](https://github.com/elpapi42/pi-observational-memory/pull/83))
-> - **Extension registration survives class-based hosts** — hooks were invoked detached from their API object, which threw on hosts like oh-my-pi; handlers are now bound before registration. ([#124](https://github.com/k0valik/pi-blackhole/pull/124))
-> - **Custom-provider streams keep their receiver** — captured `streamSimple` handlers are bound to their config, so class-based providers no longer crash or silently fall back to the compat dispatcher. ([upstream OM `#80`](https://github.com/elpapi42/pi-observational-memory/pull/80))
->
-> See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
+本仓库基于原版 [`k0valik/pi-blackhole`](https://github.com/k0valik/pi-blackhole)（基线 v0.5.8+），针对 **中文对话交互**、**长会话记忆完整性** 以及 **上下文预算安全** 进行了深度优化与重构：
+
+### 1. 中文深度兼容与增强 (CJK Support)
+- **Token 准确估算**：针对 CJK 字符采用约 1.5 token/字更保守合理的估算规则（原版约 1 token/字严重偏低），消除中文长文本因低估 token 在压缩前挤爆硬上下文上限的隐患。
+- **中文语义分词与检索**：`recall` 检索全面集成原生 `Intl.Segmenter` 分词与双字（bi-gram）索引，支持中文关键词搜索与上下文定位；长句按中文标点习惯合理断句截断。
+- **偏好与指令精确提取**：优化中文条件句（「如果…」）与否定句（「不要…」）提取逻辑，复合语句拆分解析，避免多条中文偏好与要求被粗暴截断或漏判。
+- **任务目标状态识别**：精准识别中文任务状态变迁（「已修复」、「仍然报错」等），独立追踪多个子问题，杜绝「解决一个问题误连带清除其他失败问题」的串扰。
+
+### 2. 记忆完整性保障与排空机制 (Input Budget & FIFO Draining)
+- **解决长任务旧记忆丢失问题**：原版 Observer 在积压消息超出单次窗口（如 50k tokens）时，会直接丢弃早期积压内容跳到末尾，导致长任务前中期的关键决策与代码排查记录永久丢失。
+- **FIFO 自动排空与原子预算**：重构为从旧到新（FIFO）分批处理未观察积压（`drain=true`），多轮排空直到追齐最新进度；引入原子输入预算保护（`src/om/input-budget.ts`），模型超限或异常时原子回滚，不造成记忆空洞或虚假推进。
+
+### 3. 精确去重 (Exact-only Deduplication)
+- 移除原版模糊编辑距离（Levenshtein）聚类合并，仅对完全相同的原文进行去重。杜绝相似代码片段或语义接近的中文记录被算法误合并、误删。
+
+### 4. 上下文预算双重拦截 (Recall Budget Protection)
+- 引入字符与 token 双重响应上限（`DEFAULT_RECALL_RESPONSE_MAX_TOKENS = 12000`），保证检索展开（`#N:text` / `#N:path`）不会一次性塞爆当前上下文窗口。
+
+### 5. Pi 0.87+ 深度适配
+- 支持 Pi 0.87 的 `agentContext` 与 `finishTurn` 控制；支持中途压缩平滑继续（`midRunCompaction: "resume"`），避免长任务连续工具调用中途上下文溢出退出。
+
+> 详细技术实现、受影响的文件清单与维护规则请参阅 [**`docs/LOCAL-DIVERGENCE.md`**](docs/LOCAL-DIVERGENCE.md) 和 [**`LOCAL-MAINTENANCE.md`**](LOCAL-MAINTENANCE.md)。
 
 ---
 
@@ -305,6 +318,8 @@ rm -rf ~/.pi/agent/pi-blackhole
 | **[`docs/OLD_CONFIG.md`](docs/OLD_CONFIG.md)**               | Reference only    | The legacy pi-vcc / pi-observational-memory config surface. Kept for historical context.  |
 | **[`example-config.json`](example-config.json)**             | You               | Annotated example config with comments.                                                   |
 | **[`docs/APPEND_COMPACTION.md`](docs/APPEND_COMPACTION.md)** | You, if curious   | Rules for `compactionSummaryMode: "append"`.                                              |
+| **[`docs/LOCAL-DIVERGENCE.md`](docs/LOCAL-DIVERGENCE.md)**   | Developers        | Detailed catalog of all architectural divergences and patch rules vs upstream.          |
+| **[`LOCAL-MAINTENANCE.md`](LOCAL-MAINTENANCE.md)**           | Maintainers       | Sync workflow, workspace bootstrap, testing guidelines, and deployment procedures.        |
 
 > **Note:** All docs except `README.md`, `CHANGELOG.md` (package root, read by `/blackhole changelog`), and `llms.txt` live under `docs/` — product docs (`architecture.md`, `CONFIG.md`, etc.); `archived_docs/` is local-only (gitignored).
 
