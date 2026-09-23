@@ -36,7 +36,7 @@
    - `node scripts/smoke-host.mjs`、`bun scripts/probe-inline-host.ts`
    - 上游全量：`node R:/pi-blackhole-upstream/node_modules/vitest/vitest.mjs run -c vitest.upstream.config.mjs --reporter=json --outputFile=R:/Temp/blackhole-upstream-<commit>.json`。失败必须能在 `UPSTREAM-MERGE-REPORT.md` 的已知清单或 `docs/LOCAL-DIVERGENCE.md` 的「上游预期失败」里找到；新增失败要么修代码，要么（仅限本地策略导致的）登记原因。
 6. **更新记录**（三处一致）：`package.json` 的 `version` 与 `blackholeUpstream.commit`；`UPSTREAM-MERGE-REPORT.md` 写本次上游变更处理表和测试结果；`docs/LOCAL-DIVERGENCE.md` 同步增删差异条目、行数统计和基线 commit。
-7. **提交**：`git add -A -- . ':!node_modules' ':!.codeindex' && git commit`（`git status` 干净）。
+7. **提交**：`git add -A && git commit`（`node_modules` 已被 .gitignore 忽略，`.codeindex/` 在 .git/info/exclude）（`git status` 干净）。
 8. **部署**：`python scripts/deploy-local.py --base <manifest 中的 integrationCommit>` 先看计划和漂移；`drift: none` 后加 `--apply`（打印 `backup:` 路径和 `deployed N files`）。脚本会先整包备份到 `C:/Users/Su/.pi/agent/backups/blackhole-deploy-<commit>-<时间>/`，确认 settings 和 Blackhole 配置未被改动，并更新 manifest。
 9. **安装目录复验**：在安装目录 `bun run check`（71+ 项通过、加载器与 inline 探针通过），然后完全重启 pi（`/reload` 可能保留旧的 inline registry）。
 
