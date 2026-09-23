@@ -43,6 +43,16 @@ export interface PreCompactionOutputData {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
+/**
+ * Object-only guard for values already typed as a union.
+ *
+ * `isRecord` over-narrows a message union: on Pi 0.87 only one member is
+ * assignable to `Record<string, unknown>`, so `message.role` collapsed to that
+ * member and the `assistant` comparison became a type error. This guard keeps
+ * the runtime null check without narrowing the union away.
+ */
+const isObject = (value: unknown): value is object => typeof value === "object" && value !== null;
+
 /** Fail-closed validator for persisted data (hand-edited or older sessions). */
 export function isPreCompactionOutputData(value: unknown): value is PreCompactionOutputData {
   if (!isRecord(value)) return false;
@@ -117,8 +127,8 @@ export function selectOmittedAssistantText(opts: {
     const entry = branch[i];
     if (!entry?.id || retainedIds.has(entry.id)) continue;
     if (entry.type !== "message") continue;
-    const message: unknown = entry.message;
-    if (!isRecord(message) || message.role !== "assistant") continue;
+    const message = entry.message;
+    if (!isObject(message) || message.role !== "assistant") continue;
     if (message.stopReason === "aborted") continue;
     const text = assistantText(message);
     if (text) return { entryId: entry.id, text };

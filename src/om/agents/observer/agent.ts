@@ -6,13 +6,10 @@
  * and throws if the API errored without collecting any tool results.
  * This allows the consolidation pipeline to fall back to alternative models.
  */
-import {
-  agentLoop,
-  type AgentContext,
-  type AgentLoopConfig,
-  type AgentTool,
-} from "@earendil-works/pi-agent-core";
+import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { buildAgentContext } from "../agent-context.js";
+import { createTurnCap, type LegacyTurnCapOption } from "../turn-cap.js";
 import {
   createBridgeStreamFn,
   createProviderFetch,
@@ -28,7 +25,6 @@ import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
 import { agentCompletionError, initialInputLimit } from '../../input-budget.js';
-import { createTurnLimit } from '../../turn-limit.js';
 import { agentInputLimit, agentInputTokens, boundedContext, budgetedStream, InputBudgetError, userPrompt, type InputBudgetOptions } from '../../input-budget.js';
 import { serializeSourceAddressedBranchEntries, type RenderableEntry } from '../../serialize.js';
 
@@ -274,15 +270,13 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
     },
   ];
 
-  const context: AgentContext = {
-    messages: [{ role: "system", content: OBSERVER_SYSTEM, timestamp: Date.now() }],
-    tools: [recordObservations as AgentTool<any>],
-  };
+  const context = buildAgentContext(OBSERVER_SYSTEM, [recordObservations as AgentTool<any>]);
 
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
+  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
-  const config: AgentLoopConfig & ProviderFetchOption = {
+  const config: AgentLoopConfig & ProviderFetchOption & LegacyTurnCapOption = {
     model,
     apiKey,
     headers,
@@ -293,7 +287,7 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
     convertToLlm: (msgs) => msgs as Message[],
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    finishTurn: createTurnLimit(args.maxTurns),
+    ...(effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : {}),
   };
 
   const loop = args.agentLoop ?? agentLoop;

@@ -16,6 +16,7 @@ import {
 import { hashId } from "../src/om/ids.js";
 import { estimateStringTokens } from "../src/om/tokens.js";
 import { observation, reflection } from "./fixtures/session.js";
+import { leadingSystemPrompt } from "./fixtures/agent-context.js";
 
 function fakeAgentLoop(
   handler: (prompts: any[], context: any, config: any) => Promise<void> | void,
@@ -39,10 +40,35 @@ describe("V3 reflector agent", () => {
     observations: [obsA, obsB],
   };
 
+  it("caps reflector turns through the 0.86 shouldStopAfterTurn hook", async () => {
+    let shouldStopAfterTurn: any;
+    const loop = fakeAgentLoop((_prompts, _context, config) => {
+      shouldStopAfterTurn = config.shouldStopAfterTurn;
+    });
+
+    await runReflector({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
+
+    expect(shouldStopAfterTurn({ message: { stopReason: "toolUse" } })).toBe(false);
+    expect(shouldStopAfterTurn({ message: { stopReason: "toolUse" } })).toBe(true);
+  });
+
+  it("caps reflector turns through the 0.87 finishTurn hook", async () => {
+    let finishTurn: any;
+    const loop = fakeAgentLoop((_prompts, _context, config) => {
+      finishTurn = config.finishTurn;
+    });
+
+    await runReflector({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
+
+    expect(finishTurn).toBeTypeOf("function");
+    expect(finishTurn({ message: { stopReason: "toolUse" } })).toBeUndefined();
+    expect(finishTurn({ message: { stopReason: "toolUse" } })).toEqual({ action: "end" });
+  });
+
   it("keeps core reflector prompt guidance in V3 terms", async () => {
     let systemPrompt = "";
     const loop = fakeAgentLoop((_prompts, context) => {
-      systemPrompt = context.messages.find((message: { role: string }) => message.role === "system")?.content ?? "";
+      systemPrompt = leadingSystemPrompt(context);
     });
 
     await runReflector({ ...baseArgs, agentLoop: loop });

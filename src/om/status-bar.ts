@@ -24,12 +24,12 @@ import type { ExtensionAPI, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { Runtime, ConsolidationPhase } from "./runtime.js";
 import {
   foldLedger,
+  observationPoolTokens,
   rawTokensSinceLastCompaction,
   rawTokensSinceObservationCoverage,
   type Entry,
 } from "./ledger/index.js";
 import { autoCompactThreshold } from "./model-budget.js";
-import { estimateStringTokens } from "./tokens.js";
 
 const STATUS_KEY = "blackhole";
 const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
@@ -244,7 +244,9 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     const folded = foldLedger(entries);
     gauges = {
       obsSince: rawTokensSinceObservationCoverage(entries),
-      pool: folded.activeObservations.reduce((sum, o) => sum + estimateStringTokens(o.content), 0),
+      // Live active pool only — the P gauge deliberately omits manual-mode
+      // pending batches (the dropper trigger includes them); see issue #120.
+      pool: observationPoolTokens(entries).tokens,
       ctxTokens: rawTokensSinceLastCompaction(entries),
     };
     syncWorkers({

@@ -1569,6 +1569,9 @@ describe("Eligibility guard (proactive auto-compaction Nothing to compact / sess
   ];
 
   function makeLargeBranch(): TestEntry[] {
+    // Pi 0.87's prepareCompaction walks the parent chain from the newest entry
+    // (buildSessionProjection), so fixtures must form a real chain or the
+    // projection is a single entry and every session reads as ineligible.
     const branch: TestEntry[] = [];
     for (let i = 0; i < 8; i++) {
       branch.push({

@@ -2,108 +2,40 @@
 
 ## 来源与结果
 
-- dev commit: `b4e0591a11d8bae8ff8be771ed298558bfab455e`。
-- 本地 `bun run check` 通过：71 项回归、strict 类型检查、pi 0.87 加载器、inline 宿主探针。
-- 根据官方 0.87 更新日志额外修复三种 worker 的 finishTurn 轮数限制；真实离线 Agent 循环验证停止请求且不提交部分结果。
-- 完整上游 suite：2142 通过，45 失败，共 2187；**未宣称全绿**。
+- dev commit：`a00bf1144391d49661d96c1a26578ad91f2e6523`（上一基线 `b4e0591`，含 v0.5.7、v0.5.8 及其后 git-status 修复）。
+- 合并方式：整合树分支 `local/b4e0591-zh`，先提交本地补丁（`2d9c86b`），再 `git merge origin/dev`。
+- 本地验收：strict 类型检查通过；`bun test ./tests/` 71 项回归全部通过；pi 0.87.1 真实加载器冒烟和 inline 宿主探针通过。
+- 完整上游 suite（vitest 5.0.1）：2223 通过，6 失败，共 2229。**未宣称全绿**；6 项失败均来自本地 token 策略，见下。
 
-## 剩余上游断言差异
+## 上游变更与处理
 
-保留失败结果，不通过放宽生产安全约束让它们变绿。主要类别：
-- 本地策略差异：精确去重而非模糊删除、CJK 更保守估算、旧 tokenCount 重算、oldest-first 连续覆盖与全量分批。
-- 测试替身仍需适配：lazy-workers 整模块 mock 缺少本地 prepareObserverInput；dropper 旧提示词字面量；部分 consolidation 预算假设。
-- 环境与工具链差异：Windows 路径/只读权限断言、模型配置测试用斜杠正则求 dirname、上游 fixture 类型检查依赖 TS6 --ignoreConfig 及 tests/ 原路径（本地 TS5.9，独立 strict 检查通过）。
-- 因完整上游 suite 未通过，本次验证不等同于所有上游行为兼容；真实模型与长会话仍需交互验证。
+| 上游变更 | 处理 |
+| --- | --- |
+| `agent-context.ts`：用宿主 `createInitialSystemMessage` + `toToolDeclaration` 构造 system 载体，兼容 ≤0.86 | 采用，替代本地手写 system 消息 |
+| `turn-cap.ts`：同时输出 `shouldStopAfterTurn` / `finishTurn` | 采用，删除本地 `turn-limit.ts`，本地测试改用 `createTurnCap` |
+| provider stream 处理函数绑定 config 作为 `this` | 采用 |
+| `compact-failed`：`pi.on.bind(pi)` | 采用 |
+| git 子进程清理 `GIT_DIR` 等仓库定位环境变量 | 采用 |
+| `cosmetic-output`：`isObject` 守卫 | 采用，替代本地 `unknown` 写法 |
+| `observationPoolTokens()` 统一观察池度量；memory 命令在 manual 模式计入 pending | 采用结构，但改为按 content 重算 token（本地策略） |
+| `package.json` 入口改为 `dist/index.js`、pnpm 11.27.1、dependabot、CONTRIBUTING | 不采用入口与工具链；文档随合并保留在整合树 |
 
-完整失败用例：
+## 剩余上游断言差异（本地策略）
 
-### blackhole-export.test.ts
-- /blackhole-export exports tiers, dedup, reflections, dropper notes and orphans to markdown
+`upstream-tests/pool-consistency.test.ts` 6 项：测试 fixture 的 `tokenCount`（700 等）与 content 长度不一致，上游直接求和 `tokenCount`；本地不信任已存 `tokenCount`，按 content 保守重算，因此绝对值不同。触发器、状态栏与 memory 命令仍共用同一个 helper，一致性不受影响。
 
-### config-simplification.test.ts
-- saveUnifiedConfig — atomic write does not crash on read-only filesystem (returns false)
-
-### consolidation.test.ts
-- anyStageDue with cursors dropper due when pool fullness passes a lowered fullness threshold
-- capSourceEntriesToTokens custom_message with string content contributes tokens (not 0)
-- capSourceEntriesToTokens custom_message with array content contributes tokens
-- capSourceEntriesToTokens message entries are still capped correctly
-- capSourceEntriesToTokens branch_summary entries are still capped correctly
-- capSourceEntriesToTokens cap respects maxTokens across mixed entry types
-- capSourceEntriesToTokens oversized newest entry is still included (first-entry guard)
-- capSourceEntriesToTokens blackhole-pre-compaction-output custom entries contribute 0 tokens
-- observer preamble cap caps priorObservations in auto mode via observerPreambleMaxTokens
-- observer preamble cap defaults to 30% of observerChunkMaxTokens when observerPreambleMaxTokens is 0
-- observer preamble cap caps priorReflections in auto mode via observerPreambleMaxTokens
-
-### dedup-algorithms.test.ts
-- dedup algorithms clusterObservations with drift guard clusters exact and fuzzy duplicates without drift
-
-### dropper-coverage.test.ts
-- V3 dropper reflection coverage helpers summarizes coverage counts and token totals by relevance
-- V3 dropper reflection coverage helpers summarizes coverage transitions by relevance without exposing ids
-
-### dropper.test.ts
-- V3 dropper agent passes budget-return max drops as a hard upper bound
-
-### lazy-workers.test.ts
-- lazy worker imports loads only the due worker and reuses it on retry
-- lazy worker imports loads all stages on demand without changing their ledger output
-
-### memory-command.test.ts
-- /blackhole-memory command status Obs pool uses the live active observation pool, not the compaction snapshot
-
-### model-budget.test.ts
-- config parsing — contextWindow on OmModelConfig parses contextWindow from model config
-- config parsing — contextWindow on OmModelConfig parses contextWindow on fallback models
-- config parsing — contextWindow on OmModelConfig rejects non-positive contextWindow values during parse
-- config parsing — contextWindow on OmModelConfig rejects NaN contextWindow values during parse
-
-### om-ledger-robust.test.ts
-- om-ledger-robust buildCompactionProjection marks fullFold when observation tokens exceed max
-- om-ledger-robust buildCompactionProjection returns all reflections regardless of fullFold
-- om-ledger-robust buildCompactionProjection fullFold remains true even if budget is exactly reached
-
-### om-tokens-cjk.test.ts
-- estimateStringTokens — CJK script awareness (#106) counts pure CJK ideographs at ~1 token per char (was ~0.25)
-- estimateStringTokens — CJK script awareness (#106) counts kana at ~1 token per char
-- estimateStringTokens — CJK script awareness (#106) counts hangul at ~1 token per char
-- estimateStringTokens — CJK script awareness (#106) blends mixed CJK + ASCII text
-- estimateStringTokens — CJK script awareness (#106) counts supplementary Han (astral plane) at ~1 token per code point
-
-### pi-extension-api.test.ts
-- extension API double preserves callback argument types through capture and replay
-
-### projection.test.ts
-- buildCompactionProjection triggers full fold when observations pool exceeds threshold
-- buildCompactionProjection — compact-all (firstKeptEntryId="") triggers full fold and caps observations when pool exceeds budget
-- bounded compaction snapshots caps rendered output on normal/full-fold paths (stored tokens 0)
-- bounded compaction snapshots compact-all retains eligible memory and drops, fullFoldAlways=false
-- bounded compaction snapshots compact-all retains eligible memory and drops, fullFoldAlways=true
-
-### reflection-dedup.test.ts
-- reflection fuzzy clustering merges a one-word reflection paraphrase into one cluster
-- export variant hiding renders a fuzzy observation pair as a single bullet
-- export variant hiding records the hidden variant count instead of a sub-bullet
-- coverage survives variant hiding keeps a single-session medium cluster cited only through a non-rep variant id
-
-### config-manager.test.ts
-- test-mode path safety respects explicit PI_CODING_AGENT_DIR even in vitest
-
-### env-paths.test.ts
-- pi-base paths and env paths should return extensions dir
-
-### config-flow.test.ts
-- ConfigFlow smoke tests save first project save notifies with absolute path
+- observationPoolTokens sums and counts the active observations
+- observationPoolTokens excludes tombstoned observations from the sum and count
+- observationPoolTokens adds every pending observation batch when pending is supplied
+- observationPoolTokens matches the inline fold sum on a pre-compaction branch (no snapshot)
+- trigger / display pool agreement auto mode
+- trigger / display pool agreement manual mode
 
 ## 已完成的测试适配
 
-仅整合副本调整：Windows Git 正斜杠 key；状态栏真实内容 token fixture；中文分句；observer mock 保留预算 planner；worker transcript system 消息和 finishTurn；压缩测试使用 pi 0.87 非 bundle CLI 路径及真实 parentId 链。原版仓库无源码补丁。
+仅整合副本调整：上游新测试从 `tests/` 移到 `upstream-tests/`；`fixtures/pi-extension-api.ts` 保留本地 turn_end 取消订阅实现；`observer.test.ts` 修正合并残留变量。
 
 ## 文件与风险边界
 
-- 全量 JSON：`R:/Temp/blackhole-full-results.json`；日志：`R:/Temp/blackhole-full-final.log`。
-- 本地 check：`R:/Temp/blackhole-check.log`。
-- 部署哈希：本目录 `deployment-manifest.json`，备份目录同时留存。
+- 全量 JSON：`R:/Temp/blackhole-sync-a00bf11.json`；日志：`R:/Temp/blackhole-sync-a00bf11.log`。
 - 未调用远程模型，未压缩真实会话，未重建历史记忆。需要完全重启 pi 验证交互运行。
-- C 盘本地包仍是启用来源；R 盘不可用不影响扩展运行（上游验收工具除外）。

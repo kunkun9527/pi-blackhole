@@ -2,24 +2,28 @@
 
 ## 当前基线
 
-- 版本：`0.5.6-dev.b4e0591.local.4`。
-- 上游：`https://github.com/k0valik/pi-blackhole.git`，`dev`，`b4e0591a11d8bae8ff8be771ed298558bfab455e`。
+- 版本：`0.5.8-dev.a00bf11.local.1`。
+- 上游：`https://github.com/k0valik/pi-blackhole.git`，`dev`，`a00bf1144391d49661d96c1a26578ad91f2e6523`（含 v0.5.7、v0.5.8 及其后 git-status 修复）。
 - 原版仓库：`R:/pi-blackhole-upstream`（dev 分支，无本地源码补丁）。
-- 整合工作树：`R:/pi-blackhole-integration`（以 dev 为基线，三方合并旧 v0.5.5 上的本地补丁）。
+- 整合工作树：`R:/pi-blackhole-integration`，分支 `local/b4e0591-zh`：先提交本地补丁，再 `git merge origin/dev`。后续同步继续在此分支 merge，基线由 git 自动追踪。
 - 实际安装：`C:/Users/Su/.pi/agent/local-packages/pi-blackhole-local`；settings 中仍只启用这个来源。
-- 入口是 `index.ts`，不依赖旧 `dist/`。运行依赖链接全局 pi 0.87.0；版本约束见 package.json，升级宿主前重新验收。
+- 入口仍是 `index.ts`（上游 0.5.8 改为 `dist/index.js` 预构建入口，本地不采用，不依赖 `dist/`）。运行依赖链接全局 pi 0.87.x；升级宿主前重新验收。
 
-## 本次合入
+## 本次合入（b4e0591 → a00bf11）
+
+- 直接采用上游：`src/om/agents/agent-context.ts`（用宿主 `createInitialSystemMessage` + `toToolDeclaration` 构造首条 system 消息，并按能力兼容 ≤0.86）；`src/om/agents/turn-cap.ts`（同时提供 `shouldStopAfterTurn` 与 `finishTurn`，替代本地 `turn-limit.ts`，已删除）；provider stream 绑定 `this`；`pi.on.bind(pi)`；git 子进程清理 `GIT_DIR` 等仓库定位变量；`cosmetic-output` 的 `isObject` 守卫（替代本地 `unknown` 写法）；memory 命令在 manual 模式显示 branch + pending 池。
+- 按本地策略改写：上游新增的 `observationPoolTokens()`（dropper 触发、状态栏、memory 命令共用）改为按 `content` 用 `estimateStringTokens` 重算，不信任已存 `tokenCount`；dropper 候选 token 仍优先使用分批 `batchPressure`。
+- 未采用：`package.json` 的 dist 入口、pnpm 版本及 dependabot 等发布工具链变更。
+
+## 更早合入（b4e0591 及之前）
 
 开发分支的文件修改归因（包括锚点编辑、bash）、Git 状态和提交识别、文件列表及摘要跨轮合并、CJK 分词检索、中文标点裁剪、observer 先前记忆上限、live status bar、压缩前输出保留、内存子会话 turn_end 压缩、createRequire 启动器宿主发现，以及 pi 0.87 compact helper 识别均已合入。
 
 `src/om/inline-compaction.ts` 使用上游 dev 的完整实现，替代此前本地临时补丁。上游只检查 own prototype helper，因此隔离测试复制真实宿主的 prototype descriptors，而不再用空子类模拟同一宿主。
 
-额外适配 pi 0.87：
-- 按官方 0.87 发布说明，将三个 worker 已移除的 `shouldStopAfterTurn` 迁移到 `finishTurn`；达到轮数上限返回 `{ action: "end" }`，error/aborted 保持硬退出语义。真实离线 Agent 循环覆盖轮数限制及不提交部分结果。
+pi 0.87 适配：
 - 官方参考：https://pi.dev/news/releases/0.87.0 。压缩继续通过宿主 compact 写入 SessionManager，不以单独覆盖 agent.state.messages 代替会话历史；`context` hook 只处理非 system 消息，系统提示与工具声明交由新版宿主恢复。
-- observer / reflector / dropper 的 system prompt 改为 `context.messages` 中的 system 消息；旧 `context.systemPrompt` 在新版真实 agentLoop 中会丢失，不只是类型报错。
-- `cosmetic-output.ts` 以 unknown 输入做运行时消息校验，避免新版消息联合类型与 Record 守卫交叉后误收窄为 never。
+- 三个 worker 的轮数上限与 system prompt 载体已改用上游实现（见上）；error/aborted 仍不计轮数，真实离线 Agent 循环覆盖轮数限制及不提交部分结果。
 - 新 status bar、memory command 的活动池用内容重新估算，保持与本地预算一致；UI-only `blackhole-pre-compaction-output` 不计入观察源压力。
 
 ## 必须保留的本地行为
@@ -46,8 +50,8 @@
 ## 备份与回退
 
 升级前完整源码备份（不含 node_modules、dist）：
-`C:/Users/Su/.pi/agent/backups/blackhole-dev-merge-20260921-235824/package`。
+`C:/Users/Su/.pi/agent/backups/blackhole-a00bf11-merge-20260923-162508/package`（本次，local.4 状态）；更早：`C:/Users/Su/.pi/agent/backups/blackhole-dev-merge-20260921-235824/package`。
 
 如需回退，先退出 pi，将该备份中的代码、package.json 和本地维护脚本恢复到实际安装目录；保留当前 node_modules 目录联接及用户配置，不整份还原 settings。用此次 `deployment-manifest.json` 中的新增文件清单识别仅新版存在的文件，删除前另行确认。恢复旧入口后新文件不会被加载；重启 pi。
 
-后续同步以本次 dev commit 为三方合并基线，先在 R 盘整合树操作，通过本地中文/预算/Agent transcript 测试和宿主探针后再部署。不要用上游的整目录覆盖替代三方合并。
+后续同步：在 R 盘整合树 `local/b4e0591-zh` 分支 `git fetch origin && git merge origin/dev`，通过本地中文/预算/Agent transcript 测试、宿主探针和上游 suite 后再部署。不要用上游的整目录覆盖替代三方合并。

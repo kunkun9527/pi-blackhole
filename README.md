@@ -12,7 +12,10 @@
 # From npm (recommended)
 pi install npm:pi-blackhole
 
-# Or directly from GitHub
+# Or directly from GitHub.
+# Requires npmCommand to be set in settings.json, otherwise pi runs
+# `npm install --omit=dev`, devDependencies are skipped, and dist/ is not built.
+# Example: "npmCommand": ["npm"] in ~/.pi/agent/settings.json
 pi install git:github.com/k0valik/pi-blackhole
 ```
 
@@ -31,15 +34,15 @@ Then `/reload` or restart Pi. The config file at `~/.pi/agent/pi-blackhole/pi-bl
 
 ## ✨ What's new
 
-> **Latest release: [0.5.6](CHANGELOG.md)**
+> **Latest release: [0.5.8](CHANGELOG.md)**
 >
-> - **Non-English (CJK) sessions are now fully script-aware** — token accounting counts CJK as ~1 token/char (no more ~3× silent overage), text clipping and `recall` queries respect CJK punctuation and word boundaries, and the extractors accept CJK correction anchors and failure stems. ([#105](https://github.com/k0valik/pi-blackhole/issues/105), [#106](https://github.com/k0valik/pi-blackhole/issues/106))
-> - **`[Files And Changes]` and `[Commits]` extract what actually happened** — file attribution correlates tool calls with results instead of guessing from a hardcoded tool list, and commit capture understands real-world flag orders and heredocs. ([#105](https://github.com/k0valik/pi-blackhole/issues/105))
-> - **Observer chunks always respect `maxTokens`** — `custom_message` entries (previously zero-counted) are now sized like every other entry. ([#110](https://github.com/k0valik/pi-blackhole/issues/110))
-> - **`[Files And Changes]` display and cross-compaction merge overhauled** — cwd-relative paths, capped lists that never shrink, and `(#N)` drill-down refs.
-> - **Pre-compaction output stays visible after compaction** — the newest assistant text dropped by compaction re-renders as a display-only block (16 KiB cap, text only), so recent work stays readable without opening `/tree`. Opt out via `showPreCompactionMessage`. ([#103](https://github.com/k0valik/pi-blackhole/pull/103))
-
-See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
+> - **Pi loads a prebuilt bundle** — `pi.extensions` points at the tsup `dist/index.js` instead of TypeScript source, cutting startup import time (500–570 ms → 350–530 ms). Registry installs ship `dist/`; git installs need `npmCommand` set, and a missing `dist/` now warns instead of failing silently.
+> - **Every observation-pool readout agrees** — the dropper trigger, `/blackhole-memory` pool lines, and the footer P gauge each summed the pool inline; they now share one helper, and `/blackhole-memory` includes (and labels) manual-mode pending batches so the display matches what the trigger gates on. No threshold or candidate behavior changes. ([#120](https://github.com/k0valik/pi-blackhole/issues/120))
+> - **`agentMaxTurns` is enforced on Pi 0.87** — the worker loops emitted only the removed `shouldStopAfterTurn`, so the turn budget was silently ignored; `createTurnCap` now emits both that hook and 0.87's `finishTurn`, with independent counters. ([upstream OM `#83`](https://github.com/elpapi42/pi-observational-memory/pull/83))
+> - **Extension registration survives class-based hosts** — hooks were invoked detached from their API object, which threw on hosts like oh-my-pi; handlers are now bound before registration. ([#124](https://github.com/k0valik/pi-blackhole/pull/124))
+> - **Custom-provider streams keep their receiver** — captured `streamSimple` handlers are bound to their config, so class-based providers no longer crash or silently fall back to the compat dispatcher. ([upstream OM `#80`](https://github.com/elpapi42/pi-observational-memory/pull/80))
+>
+> See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
 ---
 
@@ -74,7 +77,8 @@ Both halves share a single hook and a single output. Together they keep the agen
 
 All commands work regardless of `compaction` mode — only _when_ auto-compaction fires changes. See [Compaction modes](#compaction-modes) below.
 
-### The `recall` tool (agent-facing)
+<details>
+<summary>The `recall` tool (agent-facing)</summary>
 
 The agent gets one unified `recall` tool that handles every form of historical lookup. Searches read the raw session file directly, bypassing compaction.
 
@@ -95,6 +99,8 @@ When the agent expands a session entry (`#N`), related observations and reflecti
 Every recall response is capped at `recallResponseMaxChars` (default 48,000 ≈ 12k tokens). Search snippet lines, expanded entries, and related observation bodies are clipped to keep a single huge stored message from flooding the context; a truncation marker names the omitted entries and how to continue (`#N:text` / `#N:path` / `page:N`).
 
 The `/blackhole-recall` command exposes the same engine to the user. Results are shown as a collapsible message and auto-fed to the agent as context.
+
+</details>
 
 ---
 
@@ -196,7 +202,8 @@ If any stage fails (model error, rate limit, timeout), remaining stages are skip
 
 ---
 
-## What the agent sees after compaction
+<details>
+<summary>What the agent sees after compaction</summary>
 
 After compaction, the agent sees something like this (sections appear only when relevant — a session with no git commits won't show `[Commits]`):
 
@@ -249,9 +256,12 @@ Use `recall` with an id to retrieve original context.
 
 > **Note:** The OM injection format uses `## Reflections` and `## Observations` Markdown headers followed by a brief footer. Each observation and reflection has a 12-char hex identifier the agent (and you, via `/blackhole-recall`) can use to recover source evidence. When no observations or reflections exist, only the short recall-guidance footer is appended.
 
+</details>
+
 ---
 
-## Feature comparison
+<details>
+<summary>Feature comparison</summary>
 
 |                                             | pi-blackhole | pi-vcc | pi-obs-memory | Pi default |
 | ------------------------------------------- | ------------ | ------ | ------------- | ---------- |
@@ -268,6 +278,8 @@ Use `recall` with an id to retrieve original context.
 | Memory toggle (`/blackhole om-off`)         | ✓            | —      | —             | —          |
 | Unified single-file config                  | ✓            | —      | —             | —          |
 | Per-session pending state                   | ✓            | —      | —             | —          |
+
+</details>
 
 ---
 
@@ -286,6 +298,7 @@ rm -rf ~/.pi/agent/pi-blackhole
 | ------------------------------------------------------------ | ----------------- | ----------------------------------------------------------------------------------------- |
 | **[`README.md`](README.md)**                                 | You, now          | Install, commands, the pitch, the value, the demo.                                        |
 | **[`CHANGELOG.md`](CHANGELOG.md)**                           | You               | Every release, what changed, who contributed.                                             |
+| **[`CONTRIBUTING.md`](CONTRIBUTING.md)**                     | You, if helping   | Branch model, dev setup, PR description format, docs/changelog gates.                     |
 | **[`docs/CONFIG.md`](docs/CONFIG.md)**                       | You, when tuning  | Every config key with type, default, behavior, and env-var overrides.                     |
 | **[`llms.txt`](llms.txt)**                                   | Your agent        | Step-by-step guided setup interview, anti-patterns, exact file paths, internal constants. |
 | **[`docs/MIGRATION-GUIDE.md`](docs/MIGRATION-GUIDE.md)**     | You, if upgrading | Old → new config key mapping, semantic changes, automatic migration behavior.             |
@@ -294,16 +307,6 @@ rm -rf ~/.pi/agent/pi-blackhole
 | **[`docs/APPEND_COMPACTION.md`](docs/APPEND_COMPACTION.md)** | You, if curious   | Rules for `compactionSummaryMode: "append"`.                                              |
 
 > **Note:** All docs except `README.md`, `CHANGELOG.md` (package root, read by `/blackhole changelog`), and `llms.txt` live under `docs/` — product docs (`architecture.md`, `CONFIG.md`, etc.); `archived_docs/` is local-only (gitignored).
-
----
-
-## Migration from an older version
-
-If you're upgrading from a pre-0.4.0 config (the old `pi-vcc` / `pi-observational-memory` keys, or an early `pi-blackhole` config with `overrideDefaultCompaction` / `noAutoCompact` / `passive`): see **[`docs/MIGRATION-GUIDE.md`](docs/MIGRATION-GUIDE.md)** for the key mapping, semantic changes, and notes on automatic migration.
-
-The short version: old keys are auto-migrated in memory at load time and the on-disk file is never mutated. Set the new keys explicitly via `/blackhole settings` (alias `/blackhole configure`) to silence the migration notification.
-
-The legacy config surface is documented at **[`docs/OLD_CONFIG.md`](docs/OLD_CONFIG.md)** for reference only — no new keys are added there.
 
 ---
 

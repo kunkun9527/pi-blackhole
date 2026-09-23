@@ -1,5 +1,7 @@
-import { estimateEntryTokens, getUsageTokens } from "../tokens.js";
+import { estimateEntryTokens, estimateStringTokens, getUsageTokens } from "../tokens.js";
 import { boundedContext } from '../input-budget.js';
+import type { PendingOMState } from "../pending.js";
+import { foldLedger } from "./fold.js";
 import {
   OM_OBSERVATIONS_DROPPED,
   OM_OBSERVATIONS_RECORDED,
@@ -138,6 +140,52 @@ export function rawTokensSinceReflectionCoverage(entries: Entry[]): number {
 
 export function rawTokensSinceDropCoverage(entries: Entry[]): number {
   return rawTokensSinceCoverage(entries, OM_OBSERVATIONS_DROPPED);
+}
+
+/**
+ * Canonical observation-pool measurement shared by the dropper trigger and
+ * the user-facing pool displays.
+ *
+ * Measures the live active pool — `foldLedger(entries).activeObservations`,
+ * every recorded observation not tombstoned by a drop — plus, when `pending`
+ * is supplied (manual mode, where records live in pending.json instead of the
+ * branch), every observation in `pending.observationBatches`.
+ *
+ * `pending` is explicit at every call site so a caller cannot obtain the
+ * number without stating which universe it means. This helper only measures;
+ * it does not select dropper candidates — the dropper deliberately ranges
+ * over a narrower delta (see `agents/dropper/agent.ts`).
+ *
+ * Local policy: stored `tokenCount` values from older sessions are not trusted
+ * (pre-#106 records under-count CJK), so every observation is re-estimated
+ * from its content with the local conservative `estimateStringTokens`. All
+ * callers share this helper, so they still move together.
+ */
+export function observationPoolTokens(
+  entries: Entry[],
+  pending?: PendingOMState,
+): { tokens: number; count: number } {
+  const { activeObservations } = foldLedger(entries);
+  let tokens = activeObservations.reduce(
+    (sum, observation) => sum + estimateStringTokens(observation.content),
+    0,
+  );
+  let count = activeObservations.length;
+
+  for (const batch of pending?.observationBatches ?? []) {
+    const data = batch.data;
+    if (typeof data !== "object" || data === null) continue;
+    const observations = (data as { observations?: unknown }).observations;
+    if (!Array.isArray(observations)) continue;
+    for (const observation of observations) {
+      count += 1;
+      if (typeof observation !== "object" || observation === null) continue;
+      const content = (observation as { content?: unknown }).content;
+      if (typeof content === "string") tokens += estimateStringTokens(content);
+    }
+  }
+
+  return { tokens, count };
 }
 
 export function findLastCompactionIndex(entries: Entry[]): number {

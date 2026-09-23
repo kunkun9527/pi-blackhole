@@ -13,6 +13,7 @@ import {
   runObserver,
 } from "../src/om/agents/observer/agent.js";
 import { estimateStringTokens } from "../src/om/tokens.js";
+import { leadingSystemPrompt } from "./fixtures/agent-context.js";
 
 function fakeAgentLoop(
   handler: (prompts: any[], context: any, config: any) => Promise<void> | void,
@@ -68,7 +69,7 @@ describe("runObserver", () => {
   it("keeps core observer prompt rules", async () => {
     let systemPrompt = "";
     const loop = fakeAgentLoop((_prompts, context) => {
-      systemPrompt = context.messages.find((message: { role: string }) => message.role === "system")?.content ?? "";
+      systemPrompt = leadingSystemPrompt(context);
     });
 
     await runObserver({ ...baseArgs, agentLoop: loop });
@@ -241,7 +242,19 @@ describe("runObserver", () => {
     expect(result.observations).toBeUndefined();
   });
 
-  it("uses maxTurns as an observer turn cap", async () => {
+  it("caps observer turns through the 0.86 shouldStopAfterTurn hook", async () => {
+    let shouldStopAfterTurn: any;
+    const loop = fakeAgentLoop((_prompts, _context, config) => {
+      shouldStopAfterTurn = (config as any).shouldStopAfterTurn;
+    });
+
+    await runObserver({ ...baseArgs, agentLoop: loop, maxTurns: 2 });
+
+    expect(shouldStopAfterTurn({ message: { stopReason: "toolUse" } })).toBe(false);
+    expect(shouldStopAfterTurn({ message: { stopReason: "toolUse" } })).toBe(true);
+  });
+
+  it("caps observer turns through the 0.87 finishTurn hook", async () => {
     let finishTurn: any;
     const loop = fakeAgentLoop((_prompts, _context, config) => {
       finishTurn = config.finishTurn;

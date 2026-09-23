@@ -5,13 +5,10 @@
  * Modified by pi-vcc-om: detects agent_end stopReason="error" in the stream
  * and throws if the API errored without collecting any tool results.
  */
-import {
-  agentLoop,
-  type AgentContext,
-  type AgentLoopConfig,
-  type AgentTool,
-} from "@earendil-works/pi-agent-core";
+import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { buildAgentContext } from "../agent-context.js";
+import { createTurnCap, type LegacyTurnCapOption } from "../turn-cap.js";
 import {
   createBridgeStreamFn,
   createProviderFetch,
@@ -26,7 +23,6 @@ import { truncateRecordContent } from "../../serialize.js";
 import { REFLECTOR_SYSTEM } from "./prompts.js";
 import { estimateStringTokens } from "../../tokens.js";
 import { agentCompletionError, initialInputLimit } from '../../input-budget.js';
-import { createTurnLimit } from '../../turn-limit.js';
 import { agentInputLimit, agentInputTokens, boundedContext, budgetedStream, planInputBatches, userPrompt, type InputBudgetOptions } from '../../input-budget.js';
 import {
   observationToSummaryLine,
@@ -187,14 +183,12 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
       timestamp: Date.now(),
     },
   ];
-  const context: AgentContext = {
-    messages: [{ role: "system", content: REFLECTOR_SYSTEM, timestamp: Date.now() }],
-    tools: [recordReflections as AgentTool<any>],
-  };
+  const context = buildAgentContext(REFLECTOR_SYSTEM, [recordReflections as AgentTool<any>]);
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
+  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
-  const config: AgentLoopConfig & ProviderFetchOption = {
+  const config: AgentLoopConfig & ProviderFetchOption & LegacyTurnCapOption = {
     model,
     apiKey,
     headers,
@@ -205,7 +199,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
     convertToLlm: (msgs) => msgs as Message[],
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    finishTurn: createTurnLimit(args.maxTurns),
+    ...(effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : {}),
   };
 
   const loop = args.agentLoop ?? agentLoop;
