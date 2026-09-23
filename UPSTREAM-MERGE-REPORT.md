@@ -3,7 +3,7 @@
 ## 来源与结果
 
 - dev commit：`a00bf1144391d49661d96c1a26578ad91f2e6523`（上一基线 `b4e0591`，含 v0.5.7、v0.5.8 及其后 git-status 修复）。
-- 合并方式：整合树分支 `local/zh`（原名 local/b4e0591-zh），先提交本地补丁（`2d9c86b`），再 `git merge origin/dev`。
+- 合并方式：整合树分支 `main`（fork 的 main；曾名 local/zh、local/b4e0591-zh），先提交本地补丁（`2d9c86b`），再 `git merge origin/dev`。
 - 本地验收：strict 类型检查通过；`bun test ./tests/` 71 项回归全部通过；pi 0.87.1 真实加载器冒烟和 inline 宿主探针通过。
 - 完整上游 suite（vitest 5.0.1）：2223 通过，6 失败，共 2229。**未宣称全绿**；6 项失败均来自本地 token 策略，见下。
 

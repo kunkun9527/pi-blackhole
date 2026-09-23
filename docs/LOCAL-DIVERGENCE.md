@@ -2,7 +2,7 @@
 
 本文件是本地版 `pi-blackhole-local` 与上游 `k0valik/pi-blackhole` 所有行为差异的单一事实来源。以下三种情况必须先读本文件：解决合并冲突、修改下表涉及的文件、判断某个上游测试失败是不是预期。
 
-- 对照基线：上游 dev `a00bf11`（0.5.8 之后）。对比命令：`git diff a00bf11 local/zh -- src index.ts ':!*.test.ts'`（整合树 `R:/pi-blackhole-integration`）。
+- 对照基线：上游 dev `a00bf11`（0.5.8 之后）。对比命令：`git diff a00bf11 main -- src index.ts ':!*.test.ts'`（整合树 `R:/pi-blackhole-integration`）。
 - 差异规模：26 个源码文件，+770 / −815 行，新增文件仅 `src/om/input-budget.ts`。
 - 同步、验收、部署流程见根目录 `LOCAL-MAINTENANCE.md`。
 
