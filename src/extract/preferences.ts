@@ -1,91 +1,63 @@
-import type { NormalizedBlock } from "../types";
-import { clip, nonEmptyLines } from "../core/content";
+import type { NormalizedBlock } from '../types';
+import { nonEmptyLines } from '../core/content';
 
-// Tightened patterns: require a clear preference construction, not bare keywords.
-const PREF_PATTERNS = [
-  /\bprefer(?:s|red|ring)?\s+\w/i,
-  /\bdon'?t want\b/i,
-  /\balways (?:use|do|run|prefer|keep|make|format|write|add|set|put|prefix|start|include|append)\b/i,
-  /\bnever (?:use|do|run|push|commit|write|ignore|add|set|put|remove|delete|include|deploy)\b/i,
-  /\bplease (?:use|avoid|keep|make|don'?t|do not|format|write)\b/i,
-  /\b(?:style|format|language|naming)\s*[:=]\s*\S/i,
-  // Correction anchors — directive/negation markers rather than preference
-  // verbs. English.
-  /\bstop (?:doing|using|adding|running|writing|committing|pushing)\b/i,
-  /\b(?:that's|this is) wrong\b/i,
-  /\b(?:revert|undo) (?:that|this|the|it|your)\b/i,
-  // Correction anchors — common CJK directive/negation markers. CJK has no
-  // word boundaries, so no \b. Deliberately excludes broad negatives (不行,
-  // 不对, 别) that occur in conversational chatter (如果不行的话, 别人).
-  /不要|不用|别再|回退|错了|停止/,
-  // Standing-instruction markers — 以后/下次/必须 scope future behavior, so
-  // they are preference signals by construction. 记住 fires unless followed
-  // by an acknowledgement particle: 记住了/记住吧/记住哦 acknowledges a
-  // previous message rather than directing future work.
-  /以后|下次|必须|记住(?!了|吧|哦)/,
-];
+const ENGLISH_PREFERENCE = /\b(?:prefer(?:s|red|ring)?\s+\w|don'?t want|always (?:use|do|run|prefer|keep|make|format|write|add|set|put|prefix|start|include|append)|never (?:use|do|run|push|commit|write|ignore|add|set|put|remove|delete|include|deploy)|please (?:use|avoid|keep|make|don'?t|do not|format|write)|(?:style|format|language|naming)\s*[:=]\s*\S)/i;
+const CHINESE_PREFERENCE = /^(?:我(?:们)?|并且|而且|以后|今后|现在)?(?:请)?(?:始终|永远|一直|务必|默认|统一|改为|改用|不要|不能|别|禁止|避免|不想|不希望|不需要|希望|要求|需要|优先|使用|采用|保持|遵循|保留).*(?:使用|采用|保持|遵循|回复|回答|输出|格式|命名|语言|风格|修改|添加|删除|提交|部署|调用|原样)/u;
+const QUESTION = /[?？]|^(?:是否|要不要|能否|可否|为什么|怎么|如何)|(?:吗|么|呢)[。！!]?$/u;
+// Upstream correction anchors, restricted to directive starts to avoid chatter.
+const CORRECTION = /^(?:(?:please\s+)?(?:stop\s+(?:doing|using)|revert\b|undo\b)|(?:that(?:'s| is)|this is)\s+wrong\b)|^(?:先|以后|今后|现在|请)?(?:不要|不用|别再|回退|停止)|^(?:以后|下次|必须)|^记住(?!了|吧|哦)/iu;
+const isQuestion = (text: string) => QUESTION.test(text) && !/^(?:can|could|would) you (?:please )?(?:always|never)\b/i.test(text);
+const CONDITIONAL = /如果|假如|假设|只有|仅在|除非|当.+时|的话|否则|\b(?:if|unless|only when)\b/iu;
 
-// Information-question openers — a line starting with one of these and ending
-// with `?`/`？` asks for information rather than directing work. Directive
-// questions ("Can you always run tests before pushing?") start with modals and
-// survive.
-//
-// CJK interrogatives match anywhere, not just at the start: CJK questions
-// commonly front a time scope before the interrogative ("以后怎么提交代码？",
-// "为什么以后要用 pnpm？"), and a `？`-ending line containing one is asking
-// something even when it also matches a standing-instruction marker.
-const INTERROGATIVE_START_RE = /^(?:what|where|when|who|whom|whose|why|how|which)\b/i;
-const CJK_INTERROGATIVE_RE = /为什么|怎么|如何|什么|哪里|哪儿|哪个|哪些|怎样|咋/;
+/** Only a whole, standalone language directive can replace another language directive. */
+function preferenceSlot(text: string): string | undefined {
+  const t = text.replace(/[。.!！]+$/u, '').trim();
+  if (/^(?:(?:我(?:们)?(?:希望|要求)|并且|以后|今后|现在)?(?:请)?(?:始终|永远|一直|务必|默认|统一|优先)?(?:使用|用|改为(?:使用|采用)?|改用|采用)?(?:中文|英文|英语|汉语)(?:进行)?(?:回复|回答|输出))$/u.test(t)) return 'response-language';
+  if (/^(?:(?:please|always)\s+)?(?:reply|respond|answer)\s+(?:in\s+)?(?:Chinese|English)$/i.test(t)) return 'response-language';
+  return undefined;
+}
+
+function clausesOf(line: string): Array<{text:string; inherited:boolean}> {
+  // Preserve conditional/quoted scope as a whole; splitting can reverse its meaning.
+  if (CONDITIONAL.test(line) || /[“”「」『』"]/.test(line)) return [{text:line,inherited:false}];
+  if (CORRECTION.test(line) && !preferenceSlot(line.split(/[，。；;！]/u)[0].trim())) return [{text:line,inherited:false}];
+  const clauses = /\p{Script=Han}/u.test(line) ? line.split(/[，。；;！]/u) : [line];
+  return clauses.flatMap(clause => {
+    const pair = clause.match(/^(.*?)(?:并且|并|而且)((?:保留|保持|遵循|不要|禁止).+)$/u);
+    // The remainder is already part of an asserted compound directive. Do not drop it
+    // merely because it fails the standalone preference recognizer.
+    return pair && preferenceSlot(pair[1].trim())
+      ? [{text:pair[1],inherited:false},{text:pair[2],inherited:true}]
+      : [{text:clause,inherited:false}];
+  });
+}
 
 export const extractPreferences = (blocks: NormalizedBlock[]): string[] => {
   const prefs: string[] = [];
-  const seen = new Set<string>();
-
   for (const b of blocks) {
-    if (b.kind !== "user") continue;
-
-    let perBlock = 0;
+    if (b.kind !== 'user') continue;
+    let fenced = false;
     for (const line of nonEmptyLines(b.text)) {
-      const trimmed = line.trim();
-      // CJK conveys ~2-3x the information per char — a bare 2-char
-      // correction (回退) is a complete directive where 5 ASCII chars would
-      // be a fragment. Markers are all 2+ chars, so a floor of 2 for CJK
-      // lines cannot admit single-char noise.
-      const minLength = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(trimmed) ? 2 : 5;
-      if (!trimmed || trimmed.length < minLength) continue;
-      if (trimmed.length > 200) continue;
-      // Reject information questions only; directive questions survive.
-      // Paired quotes are stripped first — nonEmptyLines only trims
-      // whitespace, so a quoted question (“以后怎么提交代码？”) ends with a
-      // quote and bypassed the terminal check, letting its marker through.
-      const questionText = trimmed.replace(/^[“‘"'「『]+/, "").replace(/[”’"'」』]+$/, "");
-      if (
-        (questionText.endsWith("?") || questionText.endsWith("？")) &&
-        (INTERROGATIVE_START_RE.test(questionText) || CJK_INTERROGATIVE_RE.test(questionText))
-      )
-        continue;
-      if (!PREF_PATTERNS.some((p) => p.test(trimmed))) continue;
-
-      const clipped = clip(trimmed, 200);
-      const key = clipped.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      prefs.push(clipped);
-
-      // Cap per user block to avoid pasting long rule lists as many prefs.
-      if (++perBlock >= 1) break;
+      if (/^\s*```/.test(line)) { fenced = !fenced; continue; }
+      if (fenced || isQuestion(line)) continue;
+      for (const raw of clausesOf(line)) {
+        const text = raw.text.trim();
+        if (text.length < (raw.inherited ? 1 : /\p{Script=Han}/u.test(text) ? 2 : 4) || text.length > 200 || isQuestion(text)) continue;
+        // Conditions remain attached to their directive, never occupy a global language slot.
+        const conditionalPreference = CONDITIONAL.test(text) && text.split(/[，,；;]/u).some(s => CHINESE_PREFERENCE.test(s.trim()) || ENGLISH_PREFERENCE.test(s));
+        if (!raw.inherited && !conditionalPreference && !CHINESE_PREFERENCE.test(text) && !ENGLISH_PREFERENCE.test(text) && !CORRECTION.test(text)) continue;
+        const slot = preferenceSlot(text);
+        for (let i = prefs.length - 1; i >= 0; i--) {
+          if (prefs[i] === text || (slot && preferenceSlot(prefs[i]) === slot)) prefs.splice(i, 1);
+        }
+        prefs.push(text);
+      }
     }
   }
-
-  return prefs.slice(0, 10);
+  return prefs.slice(-10);
 };
 
-/**
- * Remove preferences that duplicate goals (case-insensitive, trimmed).
- * Called by `buildSections` so that the two sections do not overlap.
- */
 export const dedupPreferencesAgainstGoals = (prefs: string[], goals: string[]): string[] => {
-  const norm = (s: string) => s.trim().toLowerCase();
-  const goalSet = new Set(goals.map(norm));
-  return prefs.filter((p) => !goalSet.has(norm(p)));
+  const goalSet = new Set(goals.map(s => s.trim()));
+  return prefs.filter(p => !goalSet.has(p.trim()));
 };

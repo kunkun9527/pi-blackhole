@@ -15,6 +15,8 @@ import type { SearchHit } from "../core/search-entries";
 import { formatRecallEntry, formatTouchedOutput } from "../core/format-recall";
 import {
   capRecallBlocks,
+  capRecallText,
+  DEFAULT_RECALL_RESPONSE_MAX_TOKENS,
   expandAllocation,
   DEFAULT_RECALL_RESPONSE_MAX_CHARS,
 } from "../core/recall-budget";
@@ -95,6 +97,7 @@ async function vccRecall(
   },
   ctx: any,
   maxChars = DEFAULT_RECALL_RESPONSE_MAX_CHARS,
+  maxTokens = DEFAULT_RECALL_RESPONSE_MAX_TOKENS,
 ) {
   const sessionFile = ctx.sessionManager.getSessionFile();
   if (!sessionFile) {
@@ -112,7 +115,7 @@ async function vccRecall(
   if (mode === "touched") {
     const { rendered, rawMessages } = loadAllMessages(sessionFile, false, lineageEntryIds);
     const touched = getTouchedFiles(rawMessages, rendered);
-    const text = formatTouchedOutput(touched, params.page, undefined, maxChars);
+    const text = formatTouchedOutput(touched, params.page, undefined, maxChars, maxTokens);
     return { content: [{ type: "text" as const, text }], details: undefined };
   }
 
@@ -177,6 +180,7 @@ async function vccRecall(
         entryBlocks,
         tailBlocks: obsBlock,
         budget: maxChars,
+        tokenBudget: maxTokens,
         continuation: "Use expand:[N] individually, or #N:text / #N:path to page a specific entry",
       });
 
@@ -284,6 +288,7 @@ async function vccRecall(
         entryBlocks,
         tailBlocks: footerBlock.concat(obsBlock),
         budget: maxChars,
+        tokenBudget: maxTokens,
         continuation: page < totalPages ? `Use page:${page + 1} for more results` : "",
       });
       output = capped.text;
@@ -303,6 +308,7 @@ async function vccRecall(
     header: recentHeader,
     entryBlocks: recentBlocks,
     budget: maxChars,
+    tokenBudget: maxTokens,
     continuation: "Refine the query or use expand:[N] for specific entries",
   });
   return {
@@ -316,7 +322,7 @@ async function vccRecall(
 const MEMORY_ID_PATTERN = /^[a-f0-9]{12}$/;
 const VCC_ENTRY_PATTERN = /^#(\d+)$/;
 
-async function omRecall(memoryId: string, ctx: any, maxChars = DEFAULT_RECALL_RESPONSE_MAX_CHARS) {
+async function omRecall(memoryId: string, ctx: any, maxChars = DEFAULT_RECALL_RESPONSE_MAX_CHARS, maxTokens = DEFAULT_RECALL_RESPONSE_MAX_TOKENS) {
   if (!MEMORY_ID_PATTERN.test(memoryId)) {
     return {
       content: [
@@ -393,6 +399,7 @@ async function omRecall(memoryId: string, ctx: any, maxChars = DEFAULT_RECALL_RE
     entryBlocks,
     tailBlocks: sourcesBlock ? [sourcesBlock] : undefined,
     budget: maxChars,
+    tokenBudget: maxTokens,
     continuation: "Full bodies stay stored — page the underlying entries via the #N source indices",
   });
 
@@ -403,7 +410,7 @@ async function omRecall(memoryId: string, ctx: any, maxChars = DEFAULT_RECALL_RE
 
 export function registerRecallTool(
   pi: ExtensionAPI,
-  omRuntime?: { config?: { recallResponseMaxChars?: number } },
+  omRuntime?: { config?: { recallResponseMaxChars?: number; recallResponseMaxTokens?: number } },
 ): void {
   // Resolved per call (not once at registration): omRuntime.config is a live
   // reference reloaded from disk (Runtime.reloadConfig), so a settings-UI edit
@@ -456,67 +463,46 @@ export function registerRecallTool(
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const maxChars = resolveMaxChars();
-      const sessionFile = ctx.sessionManager.getSessionFile();
-      if (!sessionFile) {
-        return {
-          content: [{ type: "text" as const, text: "No session file available." }],
-          details: undefined,
-        };
-      }
-
-      const scope = normalizeRecallScope(params.scope);
-      const lineageEntryIds =
-        scope === "lineage" ? getActiveLineageEntryIds(ctx.sessionManager) : undefined;
-
-      // Drill-down: #N:path resolves to file-scoped tool content. Anchored so
-      // inline mentions like "see #42:auth.ts" are never treated as drill-down.
-      // Honors scope like every other recall path: the target entry must be on
-      // the active lineage unless scope:'all'. Membership is checked against
-      // global indices; expandEntryFile keeps loading unfiltered so #N stays
-      // aligned with the global message index.
-      const q = params.query?.trim();
-      if (q && parseDrillDown(q)) {
-        const parsed = parseDrillDown(q)!;
-        if (lineageEntryIds) {
-          const { rendered } = loadAllMessages(sessionFile, false, lineageEntryIds);
-          if (!rendered.some((m) => m.index === parsed.index)) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Cannot expand indices outside active lineage: ${parsed.index}. Use scope:'all' to reach other branches.`,
-                },
-              ],
-              details: undefined,
-            };
+      const maxTokens = omRuntime?.config?.recallResponseMaxTokens ?? DEFAULT_RECALL_RESPONSE_MAX_TOKENS;
+      const result = await (async () => {
+        const sessionFile = ctx.sessionManager.getSessionFile();
+        if (!sessionFile) {
+          return { content: [{ type: "text" as const, text: "No session file available." }], details: undefined };
+        }
+        const scope = normalizeRecallScope(params.scope);
+        const lineageEntryIds = scope === "lineage"
+          ? getActiveLineageEntryIds(ctx.sessionManager) : undefined;
+        const q = params.query?.trim();
+        const parsed = q ? parseDrillDown(q) : undefined;
+        if (parsed) {
+          if (lineageEntryIds) {
+            const { rendered } = loadAllMessages(sessionFile, false, lineageEntryIds);
+            if (!rendered.some((m) => m.index === parsed.index)) {
+              return {
+                content: [{ type: "text" as const, text: `Cannot expand indices outside active lineage: ${parsed.index}. Use scope:'all' to reach other branches.` }],
+                details: undefined,
+              };
+            }
           }
+          const text = expandEntryFile(sessionFile, parsed.index, parsed.pathPattern, parsed.full, parsed.offset, parsed.limit);
+          return {
+            content: [{ type: "text" as const, text: capRecallText(text, maxChars, maxTokens, `Use #${parsed.index}:${parsed.pathPattern}:offset:limit with smaller line ranges.`) }],
+            details: undefined,
+          };
         }
-        const text = expandEntryFile(
-          sessionFile,
-          parsed.index,
-          parsed.pathPattern,
-          parsed.full,
-          parsed.offset,
-          parsed.limit,
-        );
-        return {
-          content: [{ type: "text" as const, text }],
-          details: undefined,
-        };
-      }
-      if (q && VCC_ENTRY_PATTERN.test(q)) {
-        // #N → expand entry indices
-        const match = q.match(VCC_ENTRY_PATTERN);
-        const index = match ? parseInt(match[1], 10) : NaN;
-        if (!Number.isNaN(index)) {
-          return vccRecall({ query: "", expand: [index] }, ctx, maxChars);
+        if (q && VCC_ENTRY_PATTERN.test(q)) {
+          const index = Number(q.slice(1));
+          return vccRecall({ ...params, query: "", expand: [index] }, ctx, maxChars, maxTokens);
         }
-      }
-      if (q && MEMORY_ID_PATTERN.test(q)) {
-        return omRecall(q, ctx, maxChars);
-      }
-      // Default: pi-vcc search
-      return vccRecall(params, ctx, maxChars);
+        if (q && MEMORY_ID_PATTERN.test(q)) return omRecall(q, ctx, maxChars, maxTokens);
+        return vccRecall(params, ctx, maxChars, maxTokens);
+      })();
+      // Final guard covers errors, empty results and future early returns too.
+      const text = result.content.map((block) => block.text).join("\n\n");
+      return {
+        ...result,
+        content: [{ type: "text" as const, text: capRecallText(text, maxChars, maxTokens, "Refine the query or use #N:text:offset:limit.") }],
+      };
     },
   });
 }

@@ -61,13 +61,13 @@ const pathTokens = (text: string): Set<string> => {
 };
 
 const extractOutstandingContext = (blocks: NormalizedBlock[]): string[] => {
-  const pending: { index: number; text: string }[] = [];
+  const pending: { index: number; text: string; subject?: string }[] = [];
   const seen = new Set<string>();
-  const push = (index: number, text: string) => {
-    const key = text.toLowerCase();
+  const push = (index: number, text: string, subject?: string) => {
+    const key = text;
     if (seen.has(key)) return;
     seen.add(key);
-    pending.push({ index, text });
+    pending.push({ index, text, subject });
   };
 
   // An error retried successfully later in the window is resolved, not
@@ -136,6 +136,31 @@ const extractOutstandingContext = (blocks: NormalizedBlock[]): string[] => {
 
     if (b.kind === "assistant" || b.kind === "user") {
       for (const line of nonEmptyLines(b.text)) {
+        // Preserve local Chinese resolution/negation scopes while retaining the
+        // upstream full-window tool retry and file attribution improvements.
+        if (/\p{Script=Han}/u.test(line)) {
+          if (/[?？]|^(?:是否|如果|假如|请|能否)|(?:吗|呢)[。！!]?$/u.test(line)) continue;
+          for (const raw of line.split(/[，,；;。]|\s+but\s+|但是|但(?=\p{Script=Han})/iu)) {
+            const clause = raw.trim().replace(/^(?:但是|但|然而|不过|but\s+)/iu, "");
+            const subject = clause.match(/^(.{1,40}?)(?:的错误|的故障|的)?(?:仍然?|依然|已经|已|不再|报错|失败|崩溃|无法|不能|未解决)/u)?.[1]?.trim();
+            const failure = /失败|报错|出错|崩溃|无法|不能|不工作|阻塞|卡住|未(?:修复|解决)|没修好/u;
+            const unresolved = /未(?:修复|解决)|(?:不是|并非|没有|尚未).*?(?:修复|解决)|\bnot (?:fixed|resolved)\b/iu;
+            const active = clause.replace(/不再(?:报错|失败|崩溃)/gu, "").replace(CJK_BENIGN_RE, "");
+            if (/(?:已经|已)(?:修复|解决|恢复)|不再(?:报错|失败|崩溃)/u.test(clause) && !unresolved.test(clause) && !failure.test(active) && !BLOCKER_RE.test(active)) {
+              if (subject) for (let i = pending.length - 1; i >= 0; i--) {
+                if (pending[i].subject === subject) {
+                  seen.delete(pending[i].text);
+                  pending.splice(i, 1);
+                }
+              }
+              continue;
+            }
+            if (!failure.test(active) && !BLOCKER_CJK_RE.test(active) && !BLOCKER_RE.test(active) && !unresolved.test(clause)) continue;
+            if (clause.length < 2 || /^\s*[-*+>(]/.test(clause)) continue;
+            push(index, `${b.kind === "user" ? "[user] " : ""}${clipSentence(clause, OUTSTANDING_CLIP)}`, subject);
+          }
+          continue;
+        }
         // Benign-compound strip first: mechanism discussion must not flag.
         const scannable = line.replace(CJK_BENIGN_RE, "");
         if (!BLOCKER_RE.test(scannable) && !BLOCKER_CJK_RE.test(scannable)) continue;

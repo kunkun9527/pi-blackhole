@@ -540,7 +540,7 @@ describe("ConfigFlow smoke tests", () => {
       await promise;
 
       expect(notify).toHaveBeenCalledWith(
-        expect.stringContaining(`Project config written to ${tempDir}`),
+        `Project config written to ${join(tempDir, ".pi", "flow-test-config.json")}`,
         "info",
       );
       expect(notify).toHaveBeenCalledTimes(1);

@@ -1,4 +1,5 @@
 import { estimateEntryTokens, getUsageTokens } from "../tokens.js";
+import { boundedContext } from '../input-budget.js';
 import {
   OM_OBSERVATIONS_DROPPED,
   OM_OBSERVATIONS_RECORDED,
@@ -251,16 +252,7 @@ export function buildExistingObservationsSummary(
   observations: Observation[],
   maxTokens: number,
 ): string {
-  const lines: string[] = [];
-  let tokens = 0;
-  for (const obs of observations) {
-    const line = `[${obs.id}] ${obs.timestamp} [${obs.relevance}] ${obs.content}`;
-    const lineTokens = Math.ceil(line.length / 4);
-    if (tokens + lineTokens > maxTokens && lines.length > 0) break;
-    lines.push(line);
-    tokens += lineTokens;
-  }
-  return lines.join("\n");
+  return boundedContext(observations.map(obs => `[${obs.id}] ${obs.timestamp} [${obs.relevance}] ${obs.content}`), maxTokens);
 }
 
 /**
@@ -271,14 +263,5 @@ export function buildExistingReflectionsSummary(
   reflections: Reflection[],
   maxTokens: number,
 ): string {
-  const lines: string[] = [];
-  let tokens = 0;
-  for (const ref of reflections) {
-    const line = `[${ref.id}] ${ref.content}`;
-    const lineTokens = Math.ceil(line.length / 4);
-    if (tokens + lineTokens > maxTokens && lines.length > 0) break;
-    lines.push(line);
-    tokens += lineTokens;
-  }
-  return lines.join("\n");
+  return boundedContext(reflections.map(ref => `[${ref.id}] ${ref.content}`), maxTokens);
 }

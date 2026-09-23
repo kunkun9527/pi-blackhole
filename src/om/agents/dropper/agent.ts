@@ -24,6 +24,18 @@ import { debugLog } from "../../debug-log.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { reflectionToSummaryLine, type Observation, type Reflection } from "../../ledger/index.js";
 import { DROPPER_SYSTEM } from "./prompts.js";
+import { agentCompletionError, initialInputLimit } from "../../input-budget.js";
+import { createTurnLimit } from "../../turn-limit.js";
+import {
+  agentInputLimit,
+  agentInputTokens,
+  boundedContext,
+  budgetedStream,
+  planInputBatches,
+  userPrompt,
+  type InputBudgetOptions,
+} from "../../input-budget.js";
+import { estimateStringTokens } from "../../tokens.js";
 import {
   REFLECTION_COVERAGE_DROP_RANK,
   coverageTierForObservation,
@@ -33,7 +45,9 @@ import {
   summarizeCoverageByRelevanceForIds,
 } from "./coverage.js";
 
-interface RunDropperArgs {
+interface RunDropperArgs extends InputBudgetOptions {
+  /** Internal batch pressure: subsets must not reset the pool's global limits. */
+  batchPressure?: { tokens: number; maxDrops: number };
   model: Model<any>;
   apiKey: string;
   headers?: Record<string, string>;
@@ -213,18 +227,14 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   } = args;
   if (observations.length === 0) return undefined;
 
-  const observationTokens = observations.reduce(
-    (sum, observation) => sum + observation.tokenCount,
-    0,
-  );
+  const observationTokens =
+    args.batchPressure?.tokens ??
+    observations.reduce((sum, observation) => sum + estimateStringTokens(observation.content), 0);
   const fullness = observationPoolFullness(observationTokens, budgetTokens);
   const urgency = dropUrgencyForFullness(fullness);
-  const maxDropsAllowed = maxDropCountForPool(
-    observations,
-    observationTokens,
-    budgetTokens,
-    skipFullness,
-  );
+  const maxDropsAllowed =
+    args.batchPressure?.maxDrops ??
+    maxDropCountForPool(observations, observationTokens, budgetTokens, skipFullness);
   const coverageById = reflectionCoverageMap(observations, reflections);
   const coverageSummaryByRelevance = summarizeCoverageByRelevance(observations, coverageById);
   debugLog("dropper.agent_start", {
@@ -334,11 +344,37 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   };
 
   const fullnessPercent = Math.round(fullness * 100);
-  const existingObservationsContext = args.existingObservationsSummary
-    ? `EXISTING ACTIVE OBSERVATIONS (for context only — these are NOT candidates for dropping):\n${args.existingObservationsSummary}\n\n`
-    : "";
-
-  const userText = `CURRENT REFLECTIONS:\n${joinOrEmpty(reflections.map(reflectionToSummaryLine))}\n\n${existingObservationsContext}NEW OBSERVATIONS TO EVALUATE FOR DROPPING:\n${joinOrEmpty(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}\n\nObservation pool pressure: ~${observationTokens.toLocaleString()} tokens; target budget: ~${budgetTokens.toLocaleString()} tokens; fullness: ~${fullnessPercent.toLocaleString()}%.\nDrop urgency: ${urgency}.\nMaximum drops allowed this run: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"}.\nThis maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
+  const limit = agentInputLimit(model, args, 80_000);
+  const contextCap = Math.floor(limit * 0.1);
+  const priorReflections = boundedContext(reflections.map(reflectionToSummaryLine), contextCap);
+  const priorObservations = boundedContext(
+    args.existingObservationsSummary?.split("\n") ?? [],
+    contextCap,
+  );
+  const render = (items: Observation[]) =>
+    `CURRENT REFLECTIONS (context only):\n${priorReflections}\n\nEXISTING ACTIVE OBSERVATIONS (context only, not drop candidates):\n${priorObservations}\n\nNEW OBSERVATIONS TO EVALUATE FOR DROPPING:\n${joinOrEmpty(items.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}\n\nPool: ${observationTokens} tokens; budget: ${budgetTokens}; fullness: ${fullnessPercent}%. Drop urgency: ${urgency}. Maximum drops allowed this run: ${maxDropsAllowed}. This is a hard upper bound, not a target. Drop fewer or none unless clearly safe.`;
+  const batches = planInputBatches(
+    observations,
+    (items) =>
+      agentInputTokens(DROPPER_SYSTEM, [dropObservations], userPrompt(render(items))) <=
+      initialInputLimit(limit),
+    "Dropper",
+  );
+  if (batches.length > 1) {
+    const candidates: string[] = [];
+    for (const batch of batches) {
+      if (signal?.aborted) throw new Error("Dropper aborted; coverage not advanced");
+      candidates.push(
+        ...((await runDropper({
+          ...args,
+          observations: batch,
+          batchPressure: { tokens: observationTokens, maxDrops: maxDropsAllowed },
+        })) ?? []),
+      );
+    }
+    return selectDropCandidates(candidates, observations, maxDropsAllowed, reflections);
+  }
+  const userText = render(observations);
   const prompts: Message[] = [
     {
       role: "user",
@@ -347,14 +383,11 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
     },
   ];
   const context: AgentContext = {
-    systemPrompt: DROPPER_SYSTEM,
-    messages: [],
+    messages: [{ role: "system", content: DROPPER_SYSTEM, timestamp: Date.now() }],
     tools: [dropObservations as AgentTool<any>],
   };
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
-  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
-  let turnCount = 0;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
   const config: AgentLoopConfig & ProviderFetchOption = {
     model,
@@ -367,15 +400,13 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
     convertToLlm: (msgs) => msgs as Message[],
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    ...(effectiveMaxTurns !== undefined
-      ? { shouldStopAfterTurn: () => ++turnCount >= effectiveMaxTurns }
-      : {}),
+    finishTurn: createTurnLimit(args.maxTurns),
   };
 
   const loop = args.agentLoop ?? agentLoop;
   // ── Bridge stream function ──
   const bridgeStreamFn = createBridgeStreamFn(streamSimple, args.modelRegistry);
-  const streamFn = args.streamFn ?? bridgeStreamFn;
+  const streamFn = budgetedStream(args.streamFn ?? bridgeStreamFn, limit);
   const stream = loop(prompts, context, config, signal, streamFn);
   let agentError: string | undefined;
   for await (const event of stream) {
@@ -385,15 +416,13 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
         stopReason?: string;
         errorMessage?: string;
       }>;
-      const lastMsg = msgs[msgs.length - 1];
-      if (lastMsg?.stopReason === "error") {
-        agentError = lastMsg.errorMessage ?? "Unknown API error";
-      }
+      agentError = agentCompletionError(msgs, signal);
     }
   }
   await stream.result();
-  if (agentError && proposedDropIds.length === 0)
-    throw new Error(`Dropper API error: ${agentError}`);
+  if (streamFn.error) throw streamFn.error;
+  if (agentError || signal?.aborted)
+    throw new Error(`Dropper failed; coverage not advanced: ${agentError ?? "aborted"}`);
   const droppedIds = selectDropCandidates(
     proposedDropIds,
     observations,
@@ -409,7 +438,7 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
           ? "all_filtered"
           : "selected_empty";
   const selectedDropTokens = droppedIds.reduce(
-    (sum, id) => sum + (allowed.get(id)?.tokenCount ?? 0),
+    (sum, id) => sum + estimateStringTokens(allowed.get(id)?.content ?? ""),
     0,
   );
   debugLog("dropper.result", {

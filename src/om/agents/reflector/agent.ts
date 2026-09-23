@@ -25,6 +25,9 @@ import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { truncateRecordContent } from "../../serialize.js";
 import { REFLECTOR_SYSTEM } from "./prompts.js";
 import { estimateStringTokens } from "../../tokens.js";
+import { agentCompletionError, initialInputLimit } from '../../input-budget.js';
+import { createTurnLimit } from '../../turn-limit.js';
+import { agentInputLimit, agentInputTokens, boundedContext, budgetedStream, planInputBatches, userPrompt, type InputBudgetOptions } from '../../input-budget.js';
 import {
   observationToSummaryLine,
   reflectionToSummaryLine,
@@ -33,7 +36,7 @@ import {
 } from "../../ledger/index.js";
 import type { ReflectionCoverageTier } from "../dropper/coverage.js";
 
-interface RunReflectorArgs {
+interface RunReflectorArgs extends InputBudgetOptions {
   model: Model<any>;
   apiKey: string;
   headers?: Record<string, string>;
@@ -159,14 +162,24 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
     },
   };
 
-  const existingReflectionsContext = args.existingReflectionsSummary
-    ? `EXISTING REFLECTIONS (for context only — do NOT re-process these):\n${args.existingReflectionsSummary}\n\n`
-    : "";
-  const existingObservationsContext = args.existingObservationsSummary
-    ? `EXISTING OBSERVATIONS (for context only — do NOT re-process these):\n${args.existingObservationsSummary}\n\n`
-    : "";
-
-  const userText = `${existingReflectionsContext}${existingObservationsContext}NEW REFLECTIONS TO PROCESS:\n${joinOrEmpty(reflections.map(reflectionToSummaryLine))}\n\nNEW OBSERVATIONS TO PROCESS:\n${joinOrEmpty(observations.map(observationToSummaryLine))}\n\nCrystallize any missing durable facts or patterns into new reflections. If nothing is stable enough, do not call the tool.`;
+  const limit = agentInputLimit(model, args, 80_000);
+  const contextCap = Math.floor(limit * 0.1);
+  const priorReflections = boundedContext([...(args.existingReflectionsSummary?.split('\n') ?? []), ...reflections.map(reflectionToSummaryLine)], contextCap);
+  const priorObservations = boundedContext(args.existingObservationsSummary?.split('\n') ?? [], contextCap);
+  const render = (items: Observation[]) => `EXISTING REFLECTIONS (context only):\n${priorReflections}\n\nEXISTING OBSERVATIONS (context only):\n${priorObservations}\n\nNEW OBSERVATIONS TO PROCESS:\n${joinOrEmpty(items.map(observationToSummaryLine))}\n\nCrystallize missing durable facts into reflections. If nothing is stable enough, do not call the tool.`;
+  const batches = planInputBatches(observations, items => agentInputTokens(REFLECTOR_SYSTEM, [recordReflections], userPrompt(render(items))) <= initialInputLimit(limit), 'Reflector');
+  if (batches.length > 1) {
+    const results = new Map<string, Reflection>();
+    for (const batch of batches) {
+      if (signal?.aborted) throw new Error('Reflector aborted; coverage not advanced');
+      for (const ref of await runReflector({...args, observations: batch}) ?? []) {
+        const previous = results.get(ref.id);
+        results.set(ref.id, previous ? {...ref, supportingObservationIds:[...new Set([...previous.supportingObservationIds, ...ref.supportingObservationIds])]} : ref);
+      }
+    }
+    return results.size ? [...results.values()] : undefined;
+  }
+  const userText = render(observations);
   const prompts: Message[] = [
     {
       role: "user",
@@ -175,14 +188,11 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
     },
   ];
   const context: AgentContext = {
-    systemPrompt: REFLECTOR_SYSTEM,
-    messages: [],
+    messages: [{ role: "system", content: REFLECTOR_SYSTEM, timestamp: Date.now() }],
     tools: [recordReflections as AgentTool<any>],
   };
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
-  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
-  let turnCount = 0;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
   const config: AgentLoopConfig & ProviderFetchOption = {
     model,
@@ -195,15 +205,13 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
     convertToLlm: (msgs) => msgs as Message[],
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    ...(effectiveMaxTurns !== undefined
-      ? { shouldStopAfterTurn: () => ++turnCount >= effectiveMaxTurns }
-      : {}),
+    finishTurn: createTurnLimit(args.maxTurns),
   };
 
   const loop = args.agentLoop ?? agentLoop;
   // ── Bridge stream function ──
   const bridgeStreamFn = createBridgeStreamFn(streamSimple, args.modelRegistry);
-  const streamFn = args.streamFn ?? bridgeStreamFn;
+  const streamFn = budgetedStream(args.streamFn ?? bridgeStreamFn, limit);
   const stream = loop(prompts, context, config, signal, streamFn);
   let agentError: string | undefined;
   for await (const event of stream) {
@@ -213,14 +221,12 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
         stopReason?: string;
         errorMessage?: string;
       }>;
-      const lastMsg = msgs[msgs.length - 1];
-      if (lastMsg?.stopReason === "error") {
-        agentError = lastMsg.errorMessage ?? "Unknown API error";
-      }
+      agentError = agentCompletionError(msgs, signal);
     }
   }
   await stream.result();
-  if (agentError && accumulated.size === 0) throw new Error(`Reflector API error: ${agentError}`);
+  if (streamFn.error) throw streamFn.error;
+  if (agentError || signal?.aborted) throw new Error(`Reflector failed; coverage not advanced: ${agentError ?? 'aborted'}`);
   return accumulated.size > 0 ? Array.from(accumulated.values()) : undefined;
 }
 

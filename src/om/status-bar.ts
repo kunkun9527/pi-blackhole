@@ -20,7 +20,7 @@
  * config-file read, preset-curve copy, token-estimation mirror, and
  * threshold-inference blocks are all replaced by in-repo sources of truth.
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { Runtime, ConsolidationPhase } from "./runtime.js";
 import {
   foldLedger,
@@ -29,6 +29,7 @@ import {
   type Entry,
 } from "./ledger/index.js";
 import { autoCompactThreshold } from "./model-budget.js";
+import { estimateStringTokens } from "./tokens.js";
 
 const STATUS_KEY = "blackhole";
 const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
@@ -38,7 +39,7 @@ const GAUGE_CELLS = 8;
 // Fraction of a gauge's max at which it starts warning (orange).
 const WARN_FRACTION = 0.8;
 
-type ThemeShim = { fg: (style: string, text: string) => string };
+type ThemeShim = { fg: (style: ThemeColor, text: string) => string };
 const EMPTY_THEME: ThemeShim = { fg: (_style, text) => text };
 
 type WorkerType = ConsolidationPhase | "compact";
@@ -96,7 +97,7 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     const filled = Math.min(GAUGE_CELLS, Math.round(Math.min(1.2, frac) * GAUGE_CELLS));
     // Fill tiers: dim under WARN_FRACTION, warning (orange in default themes)
     // as it nears the trigger, error (red) at or above 100%.
-    let color = "dim";
+    let color: ThemeColor = "dim";
     if (frac >= 1) color = "error";
     else if (frac >= WARN_FRACTION) color = "warning";
     return (
@@ -243,7 +244,7 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     const folded = foldLedger(entries);
     gauges = {
       obsSince: rawTokensSinceObservationCoverage(entries),
-      pool: folded.activeObservations.reduce((sum, o) => sum + (o.tokenCount ?? 0), 0),
+      pool: folded.activeObservations.reduce((sum, o) => sum + estimateStringTokens(o.content), 0),
       ctxTokens: rawTokensSinceLastCompaction(entries),
     };
     syncWorkers({
@@ -291,10 +292,12 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
   }
 
   pi.on("session_start", (_event, ctx) => {
-    ui = ctx.ui as StatusBarUi;
+    // Headless SDK contexts expose a UI shim whose theme getter may throw.
+    ui = ctx.hasUI ? ctx.ui : undefined;
     model = ctx.model;
     lastCtx = ctx as BranchCtx;
     clearWorkers();
+    if (!ui) return;
     recompute(ctx as BranchCtx);
     // The pipeline can launch after this module's event handlers ran (handler
     // order inside one event is not a guarantee we own), and an idle session

@@ -27,8 +27,12 @@ import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
+import { agentCompletionError, initialInputLimit } from '../../input-budget.js';
+import { createTurnLimit } from '../../turn-limit.js';
+import { agentInputLimit, agentInputTokens, boundedContext, budgetedStream, InputBudgetError, userPrompt, type InputBudgetOptions } from '../../input-budget.js';
+import { serializeSourceAddressedBranchEntries, type RenderableEntry } from '../../serialize.js';
 
-interface RunObserverArgs {
+interface RunObserverArgs extends InputBudgetOptions {
   model: Model<any>;
   apiKey: string;
   headers?: Record<string, string>;
@@ -89,6 +93,29 @@ const RecordObservationsSchema = Type.Object({
     },
   ),
 });
+
+const OBSERVER_TOOL_DESCRIPTION = 'Record a batch of observations from the supplied source entries. Continue until the chunk is covered, then confirm completion.';
+function observerText(chunk: string, reflections: readonly string[], observations: readonly string[]): string {
+  return `CURRENT REFLECTIONS:\n${reflections.join('\n') || '(none yet)'}\n\nCURRENT OBSERVATIONS:\n${observations.join('\n') || '(none yet)'}\n\nCompress the following new conversation chunk into observations. Do not restate facts already present in the supplied prior context. Call record_observations until the chunk is fully covered, then confirm completion.\n\nNEW CONVERSATION CHUNK:\n${chunk}`;
+}
+/** Choose an oldest-first contiguous prefix using the exact initial prompt layout. */
+export function prepareObserverInput(entries: RenderableEntry[], model: any, options: InputBudgetOptions, reflections: string[], observations: string[]) {
+  const limit = agentInputLimit(model, options, 40_000);
+  const contextCap = Math.floor(limit * 0.1);
+  const priorReflections = [boundedContext(reflections, contextCap)].filter(Boolean);
+  const priorObservations = [boundedContext(observations, contextCap)].filter(Boolean);
+  const tools = [{name:'record_observations',description:OBSERVER_TOOL_DESCRIPTION,parameters:RecordObservationsSchema}];
+  const fits = (count: number) => agentInputTokens(OBSERVER_SYSTEM, tools, userPrompt(observerText(serializeSourceAddressedBranchEntries(entries.slice(0,count)).text, priorReflections, priorObservations))) <= initialInputLimit(limit);
+  if (entries.length && !fits(1)) {
+    // Source coverage takes priority over optional prior context.
+    priorReflections.splice(0, priorReflections.length, '(prior context omitted)');
+    priorObservations.splice(0, priorObservations.length);
+  }
+  if (entries.length && !fits(1)) throw new InputBudgetError(`Observer: first source entry ${entries[0]?.id} cannot fit initial input budget ${initialInputLimit(limit)} (completion headroom reserved); original retained and coverage not advanced.`);
+  let low = 0, high = entries.length;
+  while (low < high) { const mid = Math.ceil((low + high) / 2); if (fits(mid)) low = mid; else high = mid - 1; }
+  return {...serializeSourceAddressedBranchEntries(entries.slice(0,low)), priorReflections, priorObservations};
+}
 
 type RecordObservationsArgs = Static<typeof RecordObservationsSchema>;
 
@@ -181,10 +208,7 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
   const recordObservations: AgentTool<typeof RecordObservationsSchema> = {
     name: "record_observations",
     label: "Record observations",
-    description:
-      "Record a batch of new observations distilled from the conversation chunk. " +
-      "Call this multiple times as you work through the chunk. Stop calling when coverage is complete, " +
-      "then emit a short plain-text confirmation to end the run.",
+    description: OBSERVER_TOOL_DESCRIPTION,
     parameters: RecordObservationsSchema,
     execute: async (_id, params: RecordObservationsArgs) => {
       toolCalled = true;
@@ -236,16 +260,11 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
     },
   };
 
-  const userText = `CURRENT REFLECTIONS:
-${joinOrEmpty(priorReflections)}
-
-CURRENT OBSERVATIONS:
-${joinOrEmpty(priorObservations)}
-
-Compress the following new conversation chunk into observations by calling record_observations one or more times. Do not restate facts already present in current reflections or current observations. Stop calling the tool and reply with a short plain-text confirmation once the chunk is fully covered.
-
-NEW CONVERSATION CHUNK:
-${conversation}`;
+  const limit = agentInputLimit(model, args, 40_000);
+  const userText = observerText(conversation, priorReflections, priorObservations);
+  if (agentInputTokens(OBSERVER_SYSTEM, [recordObservations], userPrompt(userText)) > limit) {
+    throw new InputBudgetError(`Observer input exceeds budget ${limit}; original retained and coverage not advanced.`);
+  }
 
   const prompts: Message[] = [
     {
@@ -256,15 +275,12 @@ ${conversation}`;
   ];
 
   const context: AgentContext = {
-    systemPrompt: OBSERVER_SYSTEM,
-    messages: [],
+    messages: [{ role: "system", content: OBSERVER_SYSTEM, timestamp: Date.now() }],
     tools: [recordObservations as AgentTool<any>],
   };
 
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
-  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
-  let turnCount = 0;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
   const config: AgentLoopConfig & ProviderFetchOption = {
     model,
@@ -277,14 +293,7 @@ ${conversation}`;
     convertToLlm: (msgs) => msgs as Message[],
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    ...(effectiveMaxTurns !== undefined
-      ? {
-          shouldStopAfterTurn: () => {
-            turnCount++;
-            return turnCount >= effectiveMaxTurns;
-          },
-        }
-      : {}),
+    finishTurn: createTurnLimit(args.maxTurns),
   };
 
   const loop = args.agentLoop ?? agentLoop;
@@ -294,7 +303,7 @@ ${conversation}`;
   // other extensions (e.g., claude-bridge). The bridge looks up streamSimple functions
   // via modelRegistry (host-composed facade → registered provider config → global map).
   const bridgeStreamFn = createBridgeStreamFn(streamSimple, args.modelRegistry);
-  const streamFn = args.streamFn ?? bridgeStreamFn;
+  const streamFn = budgetedStream(args.streamFn ?? bridgeStreamFn, limit);
   const stream = loop(prompts, context, config, signal, streamFn);
   let agentError: string | undefined;
   for await (const event of stream) {
@@ -304,15 +313,14 @@ ${conversation}`;
         stopReason?: string;
         errorMessage?: string;
       }>;
-      const lastMsg = msgs[msgs.length - 1];
-      if (lastMsg?.stopReason === "error") {
-        agentError = lastMsg.errorMessage ?? "Unknown API error";
-      }
+      agentError = agentCompletionError(msgs, signal);
     }
   }
   await stream.result();
+  if (streamFn.error) throw streamFn.error;
+  if (signal?.aborted) throw new Error('Observer aborted; coverage not advanced');
 
-  if (agentError && accumulated.size === 0) {
+  if (agentError) {
     throw new Error(`Observer API error: ${agentError}`);
   }
 

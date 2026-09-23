@@ -1,23 +1,10 @@
 /**
- * Near-duplicate clustering for the observational-memory corpus.
- *
- * Receipts: plan-07 §19.4 —
- *  - exact normalized-content grouping first (halves real corpora; kills
- *    fork/move inflation and pipeline record bursts),
- *  - levenshtein clustering as a *refinement* over group representatives,
- *  - Sørensen-Dice token-set similarity as a second refinement pass over the
- *    remaining reps (catches paraphrases that share vocabulary but reorder
- *    words — where edit distance alone falls short), combined with a floor
- *    on Levenshtein so pure keyword overlap cannot merge distinct facts,
- *  - recurrence signal is damped: log(1 + distinctSessions), never raw counts.
+ * Lossless exact clustering for memory export. Unicode token similarity is
+ * retained for retrieval and ranking, never as proof that two facts are equal.
  */
 import type { CorpusObservation, CorpusReflection } from "./corpus.js";
 import type { Relevance } from "../om/ledger/types.js";
 
-const NORM_CAP = 600;
-const FUZZY_THRESHOLD = 0.88;
-const SORENSEN_FUZZY_THRESHOLD = 0.7;
-const SORENSEN_MIN_LEVENSHTEIN = 0.45;
 
 /**
  * Tokens stripped before similarity scoring — "user"/"agent" appear in the
@@ -358,11 +345,41 @@ export function stemToken(token: string): string {
   return word.length >= 3 ? word : token;
 }
 
+/** Unicode scripts that need segmentation without ASCII word boundaries. */
+const CJK_SCRIPT_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const CJK_RUN_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
+let _surfaceSegmenter: Intl.Segmenter | null | undefined;
+
+const surfaceSegments = (text: string): string[] => {
+  if (_surfaceSegmenter === undefined) {
+    try {
+      _surfaceSegmenter = new Intl.Segmenter(undefined, { granularity: "word" });
+    } catch {
+      _surfaceSegmenter = null;
+    }
+  }
+  if (_surfaceSegmenter) {
+    return Array.from(_surfaceSegmenter.segment(text), (part) => part.segment);
+  }
+  return text.match(/[\p{L}\p{N}]+/gu) ?? [];
+};
+
+const addCjkBigrams = (tokens: string[], text: string): void => {
+  for (const match of text.matchAll(CJK_RUN_RE)) {
+    const chars = Array.from(match[0]);
+    for (let i = 0; i + 1 < chars.length; i++) {
+      tokens.push(chars.slice(i, i + 2).join(""));
+    }
+  }
+};
+
 /**
  * Split content into normalized surface tokens before morphological stemming.
  *
- * Topic matching uses the stemmed form, while topic labels need the original
- * words (for example, "register" rather than the internal stem "regist").
+ * English keeps the existing word/stemming behavior. CJK content uses
+ * Intl.Segmenter when available and adds character bigrams as a conservative
+ * fallback for different valid segmentations. CJK tokens are not subject to
+ * the English minimum-length filter.
  */
 export function tokenizeSurfaceContent(content: string): string[] {
   // Expand common contractions so "don't" and "do not" share tokens
@@ -395,23 +412,27 @@ export function tokenizeSurfaceContent(content: string): string[] {
     .replace(/\byou're\b/gi, "you are")
     .replace(/\bwe're\b/gi, "we are")
     .replace(/\bthey're\b/gi, "they are");
-  // Split camelCase and PascalCase before stripping non-alpha
+  // Split camelCase and PascalCase before segmentation.
   const splitCamel = expanded.replace(/([a-z])([A-Z])/g, "$1 $2");
-  const rawTokens = splitCamel
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter(
-      (t) =>
-        t.length >= 3 &&
-        !STOP_WORDS.has(t) &&
-        !/^\d+$/.test(t) &&
-        // Filter commit-like hex sequences (a7a15b5a, 837530d7, etc.)
-        !/^[a-f0-9]{7,}$/i.test(t) &&
-        // Filter single letters attached to parens/hyphens
-        !/^[a-z]$/.test(t),
-    );
-  return rawTokens;
+  const tokens: string[] = [];
+  for (const segment of surfaceSegments(splitCamel)) {
+    if (!/[\p{L}\p{N}]/u.test(segment)) continue;
+    const token = segment
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}+#._@:/-]/gu, "");
+    if (!token || /^\d+$/.test(token)) continue;
+    const isCjk = CJK_SCRIPT_RE.test(token);
+    if (!isCjk && token.length < 3 && !/[+#._@:/-]/u.test(token)) continue;
+    if (!isCjk && STOP_WORDS.has(token)) continue;
+    if (!/^[a-f0-9]{7,}$/i.test(token) && !/^[a-z]$/i.test(token)) {
+      tokens.push(token);
+    }
+  }
+  // Make matching robust to Segmenter dictionary differences without using
+  // n-grams as a standalone merge decision.
+  addCjkBigrams(tokens, splitCamel);
+  return tokens;
 }
 
 /** Normalized, stop-word-stripped and stemmed token list for a piece of content. */
@@ -495,50 +516,19 @@ export function normalizeContent(content: string): string {
     .replace(/\bwe're\b/gi, "we are")
     .replace(/\bthey're\b/gi, "they are");
   return expanded
+    .normalize("NFKC")
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, NORM_CAP);
+    // Search-only normalization retains code punctuation; never use as identity.
+    .replace(/\s+/gu, " ")
+    .trim();
 }
 
-function levenshteinSimilarity(a: string, b: string): number {
-  if (a === b) return 1;
-  if (!a.length || !b.length) return 0;
-  let prev: number[] = Array.from({ length: b.length + 1 });
-  let cur: number[] = Array.from({ length: b.length + 1 });
-  for (let j = 0; j <= b.length; j++) prev[j] = j;
-  for (let i = 1; i <= a.length; i++) {
-    cur[0] = i;
-    const ca = a.charCodeAt(i - 1);
-    for (let j = 1; j <= b.length; j++) {
-      cur[j] = Math.min(
-        prev[j] + 1,
-        cur[j - 1] + 1,
-        prev[j - 1] + (ca === b.charCodeAt(j - 1) ? 0 : 1),
-      );
-    }
-    [prev, cur] = [cur, prev];
-  }
-  return 1 - prev[b.length] / Math.max(a.length, b.length);
+/** Lossless identity for deletion decisions. Search normalization is NOT identity. */
+export function exactContentKey(content: string): string {
+  return content;
 }
 
-function bigramJaccard(a: string, b: string, cache: Map<string, Set<string>>): number {
-  const bigrams = (s: string): Set<string> => {
-    let set = cache.get(s);
-    if (!set) {
-      set = new Set<string>();
-      for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
-      cache.set(s, set);
-    }
-    return set;
-  };
-  const A = bigrams(a);
-  const B = bigrams(b);
-  let inter = 0;
-  for (const g of A) if (B.has(g)) inter++;
-  return inter / (A.size + B.size - inter);
-}
+
 
 /**
  * Sørensen-Dice coefficient over stop-word-stripped token sets.
@@ -605,33 +595,17 @@ function pickRep<T extends ClusterableItem>(members: T[]): T {
   return members.reduce((best, m) => (tsValue(m.timestamp) > tsValue(best.timestamp) ? m : best));
 }
 
-class UnionFind {
-  private parent: number[];
-  constructor(n: number) {
-    this.parent = Array.from({ length: n }, (_, i) => i);
-  }
-  find(x: number): number {
-    while (this.parent[x] !== x) {
-      this.parent[x] = this.parent[this.parent[x]];
-      x = this.parent[x];
-    }
-    return x;
-  }
-  union(a: number, b: number): void {
-    this.parent[this.find(a)] = this.find(b);
-  }
-}
 
-/** Exact normalized-content group shared by observation and reflection clustering. */
+/** Lossless content group shared by observation and reflection clustering. */
 interface ClusterGroup<T> {
   key: string;
   members: T[];
 }
 
-function groupByNormalizedContent<T extends ClusterableItem>(items: T[]): Array<ClusterGroup<T>> {
+function groupByExactContent<T extends ClusterableItem>(items: T[]): Array<ClusterGroup<T>> {
   const groups = new Map<string, T[]>();
   for (const item of items) {
-    const key = normalizeContent(item.content);
+    const key = exactContentKey(item.content);
     const group = groups.get(key);
     if (group) group.push(item);
     else groups.set(key, [item]);
@@ -639,99 +613,6 @@ function groupByNormalizedContent<T extends ClusterableItem>(items: T[]): Array<
   return [...groups.entries()].map(([key, members]) => ({ key, members }));
 }
 
-function collectMergedGroups<T>(
-  groups: Array<ClusterGroup<T>>,
-  uf: UnionFind,
-): Array<ClusterGroup<T>> {
-  const merged = new Map<number, ClusterGroup<T>>();
-  groups.forEach((g, i) => {
-    const root = uf.find(i);
-    const acc = merged.get(root);
-    if (acc) {
-      acc.members.push(...g.members);
-    } else {
-      merged.set(root, { key: g.key, members: [...g.members] });
-    }
-  });
-  return [...merged.values()];
-}
-
-/**
- * Fuzzy merge pass over exact groups (bigram-Jaccard prefilter →
- * Levenshtein@0.88 with drift guard).
- */
-function fuzzyMergeGroups<T>(groups: Array<ClusterGroup<T>>): Array<ClusterGroup<T>> {
-  const uf = new UnionFind(groups.length);
-  const cache = new Map<string, Set<string>>();
-  // Sort so most authoritative group representatives are candidate cluster heads
-  for (let i = 0; i < groups.length; i++) {
-    for (let j = i + 1; j < groups.length; j++) {
-      const rootI = uf.find(i);
-      const rootJ = uf.find(j);
-      if (rootI === rootJ) continue;
-      const a = groups[i].key;
-      const b = groups[j].key;
-      const la = a.length;
-      const lb = b.length;
-      if (Math.abs(la - lb) > (1 - FUZZY_THRESHOLD) * Math.max(la, lb, 1)) continue;
-      if (bigramJaccard(a, b, cache) < FUZZY_THRESHOLD - 0.15) continue;
-      if (levenshteinSimilarity(a, b) >= FUZZY_THRESHOLD) {
-        // Drift guard: verify similarity with root representative
-        const rootKey = groups[rootI].key;
-        if (levenshteinSimilarity(rootKey, b) >= FUZZY_THRESHOLD - 0.08) {
-          uf.union(i, j);
-        }
-      }
-    }
-  }
-  return collectMergedGroups(groups, uf);
-}
-
-/**
- * Sørensen-Dice token-set merge pass over exact groups. Merges tightly related
- * clusters that the Levenshtein pass missed (paraphrases with word-order
- * changes). Uses SimHash64 for O(1) candidate pruning and a floor on
- * Levenshtein to prevent pure keyword overlap from merging distinct facts.
- */
-function sorensenMergeGroups<T extends ClusterableItem>(
-  groups: Array<ClusterGroup<T>>,
-): Array<ClusterGroup<T>> {
-  const uf = new UnionFind(groups.length);
-  // Precompute reps, tokens, sets, and SimHash64 for O(n) precomputation
-  const groupReps = groups.map((g) => normalizeContent(pickRep(g.members).content));
-  const tokenLists = groupReps.map((s) => tokenizeContent(s));
-  const repTokens = tokenLists.map((tokens) => new Set(tokens));
-  const repHashes = tokenLists.map((tokens) => computeSimHash64(tokens));
-  for (let i = 0; i < groups.length; i++) {
-    for (let j = i + 1; j < groups.length; j++) {
-      const rootI = uf.find(i);
-      const rootJ = uf.find(j);
-      if (rootI === rootJ) continue;
-      const a = groupReps[i];
-      const b = groupReps[j];
-      const la = a.length;
-      const lb = b.length;
-      if (Math.abs(la - lb) > (1 - SORENSEN_FUZZY_THRESHOLD) * Math.max(la, lb, 1)) continue;
-      // SimHash candidate filter: dissimilar token sets have Hamming distance > 26
-      if (
-        repTokens[i].size >= 4 &&
-        repTokens[j].size >= 4 &&
-        simHashHammingDistance(repHashes[i], repHashes[j]) > 26
-      ) {
-        continue;
-      }
-      if (levenshteinSimilarity(a, b) < SORENSEN_MIN_LEVENSHTEIN) continue;
-      if (sorensenDiceSets(repTokens[i], repTokens[j]) >= SORENSEN_FUZZY_THRESHOLD) {
-        // Drift guard: check against root token set
-        const rootTokenSet = repTokens[rootI];
-        if (sorensenDiceSets(rootTokenSet, repTokens[j]) >= SORENSEN_FUZZY_THRESHOLD - 0.1) {
-          uf.union(i, j);
-        }
-      }
-    }
-  }
-  return collectMergedGroups(groups, uf);
-}
 
 function finalizeClusters<T extends ClusterableItem>(
   groups: Array<ClusterGroup<T>>,
@@ -748,8 +629,8 @@ function finalizeClusters<T extends ClusterableItem>(
     const { members } = group;
     const bestRelevance = opts.bestRelevanceOf(members);
     const rep = opts.repOf(members, bestRelevance);
-    const repKey = normalizeContent(rep.content);
-    const variants = members.filter((m) => m !== rep && normalizeContent(m.content) !== repKey);
+    const repKey = exactContentKey(rep.content);
+    const variants = members.filter((m) => m !== rep && exactContentKey(m.content) !== repKey);
     const allIds: string[] = [];
     for (const m of members) {
       const id = opts.idOf(m);
@@ -783,22 +664,15 @@ function finalizeClusters<T extends ClusterableItem>(
   return clusters;
 }
 
-/**
- * Cluster observations: exact normalized grouping, then optional fuzzy merge
- * of group representatives (bigram-Jaccard prefilter → Levenshtein@0.88 with drift guard),
- * then optional Sørensen-Dice token-set merge over remaining reps
- * (SimHash prefilter → Sørensen-Dice ≥ 0.70 + Levenshtein ≥ 0.45). `maxVariants` bounds
- * how many near-identical members are kept as hidden variants; rendered output
- * shows only the representative plus a "+N variants" count.
- */
+/** Exact observation grouping; similarity contributes only to the ranking signal. */
 export function clusterObservations(
   items: CorpusObservation[],
   opts?: { fuzzy?: boolean; sorensen?: boolean; maxVariants?: number },
 ): Array<MemoryCluster<CorpusObservation>> {
   const maxVariants = opts?.maxVariants ?? 2;
-  let allGroups = groupByNormalizedContent(items);
-  if (opts?.fuzzy && allGroups.length > 1) allGroups = fuzzyMergeGroups(allGroups);
-  if (opts?.sorensen && allGroups.length > 1) allGroups = sorensenMergeGroups(allGroups);
+  // Local safety policy: fuzzy/sorensen options remain API-compatible but
+  // similarity is used only for ranking, never to discard distinct facts.
+  const allGroups = groupByExactContent(items);
   return finalizeClusters(allGroups, {
     maxVariants,
     bestRelevanceOf: (members) =>
@@ -815,20 +689,14 @@ export function clusterObservations(
   });
 }
 
-/**
- * Cluster reflections: exact normalized grouping by default (they are already
- * syntheses), with optional fuzzy + Sørensen passes mirroring observations.
- * Reflection variants are never rendered as sub-bullets — the surviving
- * representative carries a hiddenVariants count instead.
- */
+/** Exact reflection grouping; legacy similarity options do not authorize deletion. */
 export function clusterReflections(
   items: CorpusReflection[],
   opts?: { fuzzy?: boolean; sorensen?: boolean; maxVariants?: number },
 ): Array<MemoryCluster<CorpusReflection>> {
   const maxVariants = opts?.maxVariants ?? 0;
-  let allGroups = groupByNormalizedContent(items);
-  if (opts?.fuzzy && allGroups.length > 1) allGroups = fuzzyMergeGroups(allGroups);
-  if (opts?.sorensen && allGroups.length > 1) allGroups = sorensenMergeGroups(allGroups);
+  // As with observations, only byte-for-byte equal text may be discarded.
+  const allGroups = groupByExactContent(items);
   return finalizeClusters(allGroups, {
     maxVariants,
     bestRelevanceOf: (): Relevance => "medium",

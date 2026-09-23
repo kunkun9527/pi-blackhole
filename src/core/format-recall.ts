@@ -69,6 +69,7 @@ export function formatTouchedOutput(
   page?: number,
   pageSize?: number,
   budget?: number,
+  tokenBudget?: number,
 ): string {
   if (touched.length === 0) {
     return "No file operations found in session history.";
@@ -87,12 +88,13 @@ export function formatTouchedOutput(
 
   const footer = touchedPageFooter(currentPage, totalPages);
 
-  if (budget !== undefined && budget > 0) {
+  if (budget !== undefined || tokenBudget !== undefined) {
     const capped = capRecallBlocks({
       header: `${header}:`,
       entryBlocks: pageFiles.map(formatTouchedFile),
       tailBlocks: footer ? [`--- ${footer} ---`] : undefined,
-      budget,
+      budget: budget ?? 0,
+      tokenBudget,
     });
     return capped.text;
   }

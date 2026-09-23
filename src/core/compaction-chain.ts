@@ -8,10 +8,9 @@ import {
 import {
   buildSessionContext,
   convertToLlm,
-  estimateTokens,
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { getUsageTokens } from "../om/tokens.js";
+import { getUsageTokens, estimateEntryTokens } from "../om/tokens.js";
 
 export interface SessionEntryLike {
   id?: string;
@@ -86,7 +85,7 @@ export interface ChainDecision extends ChainProjection {
 
 /** Estimate actual provider-visible content, including host summary wrappers. */
 const visibleTokens = (messages: any[]): number =>
-  convertToLlm(messages).reduce((total, message) => total + estimateTokens(message), 0);
+  convertToLlm(messages).reduce((total, message) => total + estimateEntryTokens({ type: "message", message }), 0);
 
 export function projectChainTokens(
   input: BuildAppendOnlyDetailsInput,

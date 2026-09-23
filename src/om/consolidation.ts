@@ -23,10 +23,8 @@ import {
 import { effectiveContextWindow } from "./model-budget.js";
 import { estimateEntryTokens, estimateStringTokens } from "./tokens.js";
 import { serializeSourceAddressedBranchEntries } from "./serialize.js";
-import { OBSERVER_SYSTEM } from "./agents/observer/prompts.js";
 
-/** Fixed overhead for system prompt, tool definitions, and turn scaffold in context window pre-check. */
-const AGENT_LOOP_RESERVE = 8_000;
+import { InputBudgetError } from './input-budget.js';
 import {
   readPendingState,
   savePendingObservation,
@@ -98,28 +96,16 @@ function sourceEntriesAfter(entries: Entry[], index: number): Entry[] {
   return entries.slice(index + 1).filter(isSourceEntry);
 }
 
-/**
- * Cap source entries to maxTokens by keeping newest entries first,
- * walking backwards until the token budget is exceeded.
- * Reuses estimateEntryTokens (the same estimator rawTokensAfterIndex uses for
- * the trigger) so the cap and the trigger never drift apart (#110).
- */
+/** Keep a contiguous oldest-first prefix. The agent's final prompt guard handles oversized singles. */
 export function capSourceEntriesToTokens(entries: Entry[], maxTokens: number): Entry[] {
   let totalTokens = 0;
   const kept: Entry[] = [];
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
-    const estTokens = estimateEntryTokens(entry);
-    if (totalTokens + estTokens > maxTokens) {
-      // Newest-first walk stops as soon as the budget is exceeded — except
-      // for the newest entry itself: a single oversized entry is still
-      // included (kept.length === 0) so the newest data is never lost.
-      if (kept.length > 0) break;
-      kept.unshift(entry);
-      break;
-    }
-    kept.unshift(entry);
-    totalTokens += estTokens;
+  for (const entry of entries) {
+    const tokens = estimateEntryTokens(entry);
+    if (totalTokens + tokens > maxTokens && kept.length) break;
+    kept.push(entry);
+    totalTokens += tokens;
+    if (totalTokens > maxTokens) break;
   }
   return kept;
 }
@@ -249,7 +235,7 @@ export function anyStageDue(entries: Entry[], runtime: Runtime, pending?: Pendin
           // Compute active observation pool tokens (branch + pending in manual mode)
           const folded = foldLedger(entries);
           let poolTokens = folded.activeObservations.reduce(
-            (s: number, o: Observation) => s + (o.tokenCount ?? 0),
+            (s: number, o: Observation) => s + estimateStringTokens(o.content),
             0,
           );
           // In manual mode, include pending observation batches
@@ -257,7 +243,7 @@ export function anyStageDue(entries: Entry[], runtime: Runtime, pending?: Pendin
             const pendingBatches = pending.observationBatches ?? [];
             for (const batch of pendingBatches) {
               poolTokens += ((batch.data as any)?.observations ?? []).reduce(
-                (s: number, o: any) => s + (o.tokenCount ?? 0),
+                (s: number, o: any) => s + estimateStringTokens(o.content ?? ''),
                 0,
               );
             }
@@ -626,6 +612,8 @@ export async function runObserverStage(
   ctx: ConsolidationCtx,
   generation: RuntimeGeneration,
   resolveModel: (stage: "observer") => Promise<ResolvedModel | undefined>,
+  runAgent?: typeof import('./agents/observer/agent.js').runObserver,
+  drain = false,
 ): Promise<StageOutcome> {
   if (!runtime.isGenerationActive(generation)) return "abort";
   let entries: Entry[];
@@ -661,7 +649,7 @@ export async function runObserverStage(
   // Anchor -1 (no cursor, no marker, no compaction) measures the full history:
   // rawTokensAfterIndex clamps -1 to index 0 (issue #87).
   const tokens = rawTokensAfterIndex(entries, effectiveStart);
-  if (tokens < runtime.config.observeAfterTokens) {
+  if (!drain && tokens < runtime.config.observeAfterTokens) {
     // Not due. Keep the anchor at the measured coverage point rather than the
     // newest entry: below-threshold content is still unobserved, so moving the
     // cursor past it would drop it permanently instead of letting it accumulate.
@@ -672,7 +660,7 @@ export async function runObserverStage(
 
   let chunkEntries = sourceEntriesAfter(entries, effectiveStart);
 
-  // Cap observer input to observerChunkMaxTokens (newest-to-oldest)
+  // Select oldest-first; every covered source must have actually reached the agent.
   const maxChunkTokens = runtime.config.observerChunkMaxTokens;
   if (tokens > maxChunkTokens) {
     chunkEntries = capSourceEntriesToTokens(chunkEntries, maxChunkTokens);
@@ -688,12 +676,7 @@ export async function runObserverStage(
     sourceEntryTimestamps,
   } = serializeSourceAddressedBranchEntries(chunkEntries);
   if (!chunk.trim() || sourceEntryIds.length === 0) return "continue";
-  const chunkTokens = Math.ceil(chunk.length / 4);
-  // Issue #110 follow-up: expose the post-cap size on the normal path (the
-  // exceptional context_window_exceeded path already logs estimatedInput).
-  // capTokens is the exact quantity capSourceEntriesToTokens enforced (the
-  // same estimateEntryTokens the trigger uses), so it can confirm/rule out
-  // the cap bug in a running install.
+  const chunkTokens = estimateStringTokens(chunk);
   const capTokens = chunkEntries.reduce((s: number, e) => s + estimateEntryTokens(e), 0);
 
   const memory = fullProjection(entries);
@@ -734,14 +717,11 @@ export async function runObserverStage(
     );
   }
 
-  // Attempt-invariant prompt overhead, measured once: the rendered preamble
-  // plus the observer system prompt. The per-model context guard below must
-  // price the real prompt — a chunk-only estimate goes blind once accumulated
-  // memory grows and every attempt 400s instead of skipping cleanly.
+  // Diagnostic only: prepareObserverInput below prices the complete prompt,
+  // including system text, tool schemas, wrappers and output headroom.
   const preambleTokens = estimateStringTokens(
     [...priorReflections, ...priorObservations].join("\n"),
   );
-  const observerSystemTokens = estimateStringTokens(OBSERVER_SYSTEM);
 
   // If manual mode: skip if this exact chunk was already processed
   if (isManualMode(runtime.config) && isObservationChunkPending(sessionId, coversUpToId)) {
@@ -765,9 +745,9 @@ export async function runObserverStage(
     runtime.tryEmitInfo(
       ctx.hasUI,
       ctx.ui,
-      `Observational memory: observer running on ~${chunkTokens.toLocaleString()}-token chunk (of ${effectiveTokens.toLocaleString()} accumulated)`,
+      `Observational memory: observer preparing an oldest-first batch from ~${effectiveTokens.toLocaleString()} accumulated tokens (candidate body ~${chunkTokens.toLocaleString()})`,
     );
-    debugLog("observer.start", {
+    debugLog("observer.candidates", {
       tokens,
       maxChunkTokens,
       chunkTokens,
@@ -790,50 +770,29 @@ export async function runObserverStage(
       stageFallbacks: stageFallbackModels(runtime, "observer"),
     });
 
-    // Check if the full estimated prompt fits in the model's context window:
-    // chunk + rendered preamble + system prompt, plus the agent-loop reserve
-    // for tool definitions and turn scaffold. (The reserve also names the
-    // system prompt, so this slightly over-counts — safe direction for a
-    // pre-flight guard.)
     const effectiveObsCtx = effectiveContextWindow(resolved.model as any, stageModelForThinking);
-    const observerEstimatedInput =
-      chunkTokens + preambleTokens + observerSystemTokens + AGENT_LOOP_RESERVE;
-    if (observerEstimatedInput > effectiveObsCtx) {
-      debugLog("observer.context_window_exceeded", {
-        estimatedInput: observerEstimatedInput,
-        chunkTokens,
-        preambleTokens,
-        systemTokens: observerSystemTokens,
-        effectiveCtx: effectiveObsCtx,
-        model: `${(resolved.model as any).provider}/${(resolved.model as any).id}`,
-      });
-      runtime.recordRetryableError(
-        stageModelForThinking,
-        new Error(
-          `context window ${effectiveObsCtx} too small for estimated input ${observerEstimatedInput}`,
-        ),
-        "observer",
-      );
-      runtime.tryEmitInfo(
-        ctx.hasUI,
-        ctx.ui,
-        `Observational memory: observer skipping ${(resolved.model as any).provider}/${(resolved.model as any).id} (context window ${effectiveObsCtx.toLocaleString()} too small for ~${observerEstimatedInput.toLocaleString()}-token input)`,
-      );
-      continue;
-    }
 
     try {
-      const { runObserver } = await import("./agents/observer/agent.js");
-      const result = await runObserver({
+      const { runObserver, prepareObserverInput } = await import("./agents/observer/agent.js");
+      const budget = {inputMaxTokens: maxChunkTokens, contextWindow: effectiveObsCtx};
+      const prepared = prepareObserverInput(chunkEntries, resolved.model, budget, priorReflections, priorObservations);
+      const coversUpToId = prepared.sourceEntryIds.at(-1);
+      if (!coversUpToId) return "continue";
+      debugLog('observer.start', {coversUpToId, sourceEntryIds:prepared.sourceEntryIds, sourceEntryCount:prepared.sourceEntryIds.length});
+      const continueSources = () => coversUpToId !== entries.filter(isSourceEntry).at(-1)?.id
+        ? runObserverStage(pi, runtime, ctx, generation, resolveModel, runAgent, true)
+        : Promise.resolve('continue' as const);
+      const result = await (runAgent ?? runObserver)({
         model: resolved.model as any,
         apiKey: resolved.apiKey,
         headers: withProviderAttributionHeaders(resolved.model as any, resolved.headers, sessionId),
         env: resolved.env,
-        priorReflections,
-        priorObservations,
-        chunk,
-        allowedSourceEntryIds: sourceEntryIds,
-        sourceEntryTimestamps,
+        ...budget,
+        priorReflections: prepared.priorReflections,
+        priorObservations: prepared.priorObservations,
+        chunk: prepared.text,
+        allowedSourceEntryIds: prepared.sourceEntryIds,
+        sourceEntryTimestamps: prepared.sourceEntryTimestamps,
         maxTurns: runtime.config.agentMaxTurns,
         thinkingLevel: stageThinkingLevel(runtime, "observer", stageModelForThinking),
         providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
@@ -874,7 +833,7 @@ export async function runObserverStage(
           ctx.ui,
           `Observational memory: ${result.observations.length} observation${result.observations.length === 1 ? "" : "s"} recorded`,
         );
-        return "continue";
+        return continueSources();
       }
 
       // No observations — diagnose the reason for the warning
@@ -907,8 +866,12 @@ export async function runObserverStage(
           `Observational memory: no observations — ${reasonLabel}`,
         );
       }
-      return "continue";
+      return continueSources();
     } catch (error) {
+      if (error instanceof InputBudgetError) {
+        runtime.recordConsolidationStageError(ctx, 'observer', error);
+        return 'abort';
+      }
       if (isStaleExtensionContextError(error)) {
         debugLog("observer.stale_ctx", { error: String(error) });
         return "abort";
@@ -1028,16 +991,10 @@ async function runReflectorStage(
       ? pendingObservationsCreatedAfter(pending, entries, pending.reflection?.coversUpToId)
       : observationsCreatedAfterIndex(entries, lastReflectionIdx);
     const newReflections = pending ? [] : reflectionsCreatedAfterIndex(entries, lastReflectionIdx);
-    const newItemsTokens = Math.ceil(
-      (newObservations.reduce((s: number, o: any) => s + o.content.length, 0) +
-        newReflections.reduce((s: number, r: any) => s + r.content.length, 0)) /
-        4,
-    );
-    const summaryBudget = Math.floor(runtime.config.reflectorInputMaxTokens * 0.15) * 2;
-    const reflectorInputTokens = Math.min(
-      newItemsTokens + summaryBudget,
-      runtime.config.reflectorInputMaxTokens,
-    );
+    const newItemsTokens =
+      newObservations.reduce((s: number, o: any) => s + estimateStringTokens(o.content), 0) +
+      newReflections.reduce((s: number, r: any) => s + estimateStringTokens(r.content), 0);
+    const reflectorInputTokens = newItemsTokens; // candidate body only; actual requests are measured by the agent
     // Adjust accumulated for pending coverage in manual mode
     let effectiveReflectionTokens = reflectionTokens;
     if (isManualMode(runtime.config)) {
@@ -1055,7 +1012,7 @@ async function runReflectorStage(
     runtime.tryEmitInfo(
       ctx.hasUI,
       ctx.ui,
-      `Observational memory: reflector running (~${effectiveReflectionTokens.toLocaleString()} tokens accumulated, ~${reflectorInputTokens.toLocaleString()}-token input)`,
+      `Observational memory: reflector processing ~${reflectorInputTokens.toLocaleString()} estimated candidate-body tokens in bounded batches`,
     );
 
     // Resolve thinking level for the specific model (fallbacks may have their own thinking config)
@@ -1068,30 +1025,8 @@ async function runReflectorStage(
       stageFallbacks: stageFallbackModels(runtime, "reflector"),
     });
 
-    // Check if estimated input fits in model's context window
-    // Use actual computed input size (new items + summary budget) instead of cap
+    // The agent plans actual serialized requests, including schemas and output reserve.
     const effectiveRefCtx = effectiveContextWindow(resolved.model as any, stageModelForThinking);
-    const reflectorEstimatedInput = reflectorInputTokens + AGENT_LOOP_RESERVE;
-    if (reflectorEstimatedInput > effectiveRefCtx) {
-      debugLog("reflector.context_window_exceeded", {
-        estimatedInput: reflectorEstimatedInput,
-        effectiveCtx: effectiveRefCtx,
-        model: `${(resolved.model as any).provider}/${(resolved.model as any).id}`,
-      });
-      runtime.recordRetryableError(
-        stageModelForThinking,
-        new Error(
-          `context window ${effectiveRefCtx} too small for estimated input ${reflectorEstimatedInput}`,
-        ),
-        "reflector",
-      );
-      runtime.tryEmitInfo(
-        ctx.hasUI,
-        ctx.ui,
-        `Observational memory: reflector skipping ${(resolved.model as any).provider}/${(resolved.model as any).id} (context window ${effectiveRefCtx.toLocaleString()} too small for ~${reflectorEstimatedInput.toLocaleString()}-token input)`,
-      );
-      continue;
-    }
 
     try {
       // Existing memory summaries for context (capped).
@@ -1124,6 +1059,8 @@ async function runReflectorStage(
 
       const { runReflector } = await import("./agents/reflector/agent.js");
       const reflections = await runReflector({
+        inputMaxTokens: runtime.config.reflectorInputMaxTokens,
+        contextWindow: effectiveRefCtx,
         model: resolved.model as any,
         apiKey: resolved.apiKey,
         headers: withProviderAttributionHeaders(resolved.model as any, resolved.headers, sessionId),
@@ -1177,6 +1114,10 @@ async function runReflectorStage(
         effectiveReflectionCoverageId: data.coversUpToId,
       };
     } catch (error) {
+      if (error instanceof InputBudgetError) {
+        runtime.recordConsolidationStageError(ctx, 'reflector', error);
+        return {outcome:'abort',sameRunReflections:[]};
+      }
       if (isStaleExtensionContextError(error)) {
         debugLog("reflector.stale_ctx", { error: String(error) });
         return { outcome: "abort", sameRunReflections: [] };
@@ -1289,14 +1230,11 @@ async function runDropperStage(
     const newObservations = pending
       ? pendingObservationsCreatedAfter(pending, entries, pending.dropped?.coversUpToId)
       : observationsCreatedAfterIndex(entries, lastDropIdx);
-    const dropperNewObsTokens = Math.ceil(
-      newObservations.reduce((s: number, o: any) => s + o.content.length, 0) / 4,
+    const dropperNewObsTokens = newObservations.reduce(
+      (sum: number, observation: any) => sum + estimateStringTokens(observation.content),
+      0,
     );
-    const dropperSummaryBudget = Math.floor(runtime.config.dropperInputMaxTokens * 0.2);
-    const dropperInputTokens = Math.min(
-      dropperNewObsTokens + dropperSummaryBudget,
-      runtime.config.dropperInputMaxTokens,
-    );
+    const dropperInputTokens = dropperNewObsTokens; // candidate body only, not a request-size precheck
     // Adjust accumulated for pending coverage in manual mode
     let effectiveDropTokens = dropTokens;
     if (isManualMode(runtime.config)) {
@@ -1308,7 +1246,7 @@ async function runDropperStage(
     runtime.tryEmitInfo(
       ctx.hasUI,
       ctx.ui,
-      `Observational memory: dropper running (~${effectiveDropTokens.toLocaleString()} tokens accumulated, ~${dropperInputTokens.toLocaleString()}-token input)`,
+      `Observational memory: dropper processing ~${dropperInputTokens.toLocaleString()} estimated candidate-body tokens in bounded batches (~${effectiveDropTokens.toLocaleString()} accumulated)`,
     );
 
     try {
@@ -1350,33 +1288,12 @@ async function runDropperStage(
         stageFallbacks: stageFallbackModels(runtime, "dropper"),
       });
 
-      // Check if estimated input fits in model's context window
-      // Use actual computed input size (new observations + summary budget) instead of cap
       const effectiveDropCtx = effectiveContextWindow(resolved.model as any, stageModelForThinking);
-      const dropperEstimatedInput = dropperInputTokens + AGENT_LOOP_RESERVE;
-      if (dropperEstimatedInput > effectiveDropCtx) {
-        debugLog("dropper.context_window_exceeded", {
-          estimatedInput: dropperEstimatedInput,
-          effectiveCtx: effectiveDropCtx,
-          model: `${(resolved.model as any).provider}/${(resolved.model as any).id}`,
-        });
-        runtime.recordRetryableError(
-          stageModelForThinking,
-          new Error(
-            `context window ${effectiveDropCtx} too small for estimated input ${dropperEstimatedInput}`,
-          ),
-          "dropper",
-        );
-        runtime.tryEmitInfo(
-          ctx.hasUI,
-          ctx.ui,
-          `Observational memory: dropper skipping ${(resolved.model as any).provider}/${(resolved.model as any).id} (context window ${effectiveDropCtx.toLocaleString()} too small for ~${dropperEstimatedInput.toLocaleString()}-token input)`,
-        );
-        continue;
-      }
 
       const { runDropper } = await import("./agents/dropper/agent.js");
       const droppedIds = await runDropper({
+        inputMaxTokens: runtime.config.dropperInputMaxTokens,
+        contextWindow: effectiveDropCtx,
         model: resolved.model as any,
         apiKey: resolved.apiKey,
         headers: withProviderAttributionHeaders(resolved.model as any, resolved.headers, sessionId),
@@ -1425,6 +1342,10 @@ async function runDropperStage(
       }
       return "continue";
     } catch (error) {
+      if (error instanceof InputBudgetError) {
+        runtime.recordConsolidationStageError(ctx, 'dropper', error);
+        return 'abort';
+      }
       if (isStaleExtensionContextError(error)) {
         debugLog("dropper.stale_ctx", { error: String(error) });
         return "abort";

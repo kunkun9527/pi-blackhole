@@ -19,9 +19,7 @@ import type { CorpusObservation, CorpusReflection, ProjectCorpus } from "./corpu
 import {
   clusterObservations,
   clusterReflections,
-  computeSimHash64,
-  normalizeContent,
-  simHashHammingDistance,
+  exactContentKey,
   stemToken,
   tokenizeContent,
   tokenizeSurfaceContent,
@@ -315,70 +313,14 @@ function passesViability(cluster: MemoryCluster<CorpusObservation>, coverage: nu
 
 // ── Reflection-wins cross-section suppression ─────────────────
 
-/**
- * Sørensen-Dice gate for cross-section suppression. Deliberately stricter
- * than the clustering threshold (0.70): only genuine restatements are
- * dropped, distinct facts sharing topic vocabulary survive.
- */
-const SUPPRESS_SORENSEN_THRESHOLD = 0.85;
-/** SimHash Hamming gate for suppression candidates (near-dupe range). */
-const SUPPRESS_SIMHASH_HAMMING = 12;
-
-/**
- * Drop observation clusters that restate an already-rendered reflection
- * (reflections are authoritative and render first). Exact normalized-content
- * matches go through an O(n+m) hash lookup; the remainder passes a
- * conservative near-duplicate gate (SimHash prefilter → Sørensen-Dice ≥
- * 0.85, both sides ≥ 4 tokens, no Levenshtein) so short or topically related
- * but distinct observations survive. Bounded well under a second for real
- * corpora — no additional async chunking needed.
- */
-function suppressCoveredByReflections(
+/** Only identical rendered text proves coverage. Similarity is not entailment. */
+export function suppressCoveredByReflections(
   obsClusters: Array<MemoryCluster<CorpusObservation>>,
   reflClusters: Array<MemoryCluster<CorpusReflection>>,
 ): { kept: Array<MemoryCluster<CorpusObservation>>; suppressed: number } {
-  if (obsClusters.length === 0 || reflClusters.length === 0) {
-    return { kept: obsClusters, suppressed: 0 };
-  }
-  const reflKeys = new Set(reflClusters.map((c) => normalizeContent(c.rep.content)));
-  const reflSigs = reflClusters.map((c) => {
-    const norm = normalizeContent(c.rep.content);
-    const tokens = tokenizeContent(norm);
-    return { set: new Set(tokens), hash: computeSimHash64(tokens), length: norm.length };
-  });
-  const kept: Array<MemoryCluster<CorpusObservation>> = [];
-  let suppressed = 0;
-  for (const cluster of obsClusters) {
-    const norm = normalizeContent(cluster.rep.content);
-    if (reflKeys.has(norm)) {
-      suppressed++;
-      continue;
-    }
-    const tokens = tokenizeContent(norm);
-    if (tokens.length < 4) {
-      kept.push(cluster);
-      continue;
-    }
-    const hash = computeSimHash64(tokens);
-    const set = new Set(tokens);
-    let covered = false;
-    for (const sig of reflSigs) {
-      if (sig.set.size < 4) continue;
-      if (
-        Math.abs(norm.length - sig.length) >
-        (1 - SUPPRESS_SORENSEN_THRESHOLD) * Math.max(norm.length, sig.length, 1)
-      )
-        continue;
-      if (simHashHammingDistance(hash, sig.hash) > SUPPRESS_SIMHASH_HAMMING) continue;
-      if (sorensenDiceSets(set, sig.set) >= SUPPRESS_SORENSEN_THRESHOLD) {
-        covered = true;
-        break;
-      }
-    }
-    if (covered) suppressed++;
-    else kept.push(cluster);
-  }
-  return { kept, suppressed };
+  const reflKeys = new Set(reflClusters.map((c) => exactContentKey(c.rep.content)));
+  const kept = obsClusters.filter((c) => !reflKeys.has(exactContentKey(c.rep.content)));
+  return { kept, suppressed: obsClusters.length - kept.length };
 }
 
 // ── Topic assignment via similarity graph ──────────────────────

@@ -13,6 +13,7 @@ export interface PiVccCompactionDetailsV1 {
   sourceMessageCount: number;
   previousSummaryUsed: boolean;
   retainedToolOutputProjection?: RetainedToolOutputProjection;
+  blackholeFullSummary?: string;
 }
 
 export interface PiVccSegmentCoverage {
@@ -53,6 +54,7 @@ export interface PiVccCompactionDetailsV2 {
   sourceMessageCount: number;
   previousSummaryUsed: boolean;
   retainedToolOutputProjection?: RetainedToolOutputProjection;
+  blackholeFullSummary?: string;
 }
 
 export type PiVccCompactionDetails = PiVccCompactionDetailsV1 | PiVccCompactionDetailsV2;

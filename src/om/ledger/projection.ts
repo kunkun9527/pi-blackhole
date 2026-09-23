@@ -5,6 +5,7 @@
  * Modified: nested snapshots, bounded output, and compact-all coverage.
  */
 import { selectPriorObservations, selectPriorReflections } from "./render-summary.js";
+import { estimateStringTokens } from '../tokens.js';
 import {
   OM_FOLDED,
   isMemoryDetails,
@@ -228,7 +229,7 @@ export function buildCompactionProjection(
     dropsBoundary: maintenanceBoundary,
   });
   const observationTokens = normalProjection.observations.reduce(
-    (total, observation) => total + observation.tokenCount,
+    (total, observation) => total + estimateStringTokens(observation.content),
     0,
   );
   const fullFold = observationTokens >= config.observationsPoolMaxTokens;

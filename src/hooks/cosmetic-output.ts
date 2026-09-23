@@ -117,7 +117,7 @@ export function selectOmittedAssistantText(opts: {
     const entry = branch[i];
     if (!entry?.id || retainedIds.has(entry.id)) continue;
     if (entry.type !== "message") continue;
-    const message = entry.message;
+    const message: unknown = entry.message;
     if (!isRecord(message) || message.role !== "assistant") continue;
     if (message.stopReason === "aborted") continue;
     const text = assistantText(message);

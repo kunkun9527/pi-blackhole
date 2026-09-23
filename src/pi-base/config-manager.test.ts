@@ -1862,7 +1862,7 @@ describe("test-mode path safety", () => {
     try {
       resetPiAgentDirCache();
       const dir = getExtensionsDir();
-      expect(dir).toBe("/tmp/custom-pi/extensions");
+      expect(dir).toBe(join("/tmp/custom-pi", "extensions"));
     } finally {
       if (origAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = origAgentDir;

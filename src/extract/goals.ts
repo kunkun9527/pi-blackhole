@@ -3,10 +3,10 @@ import { nonEmptyLines, clip } from "../core/content";
 import { collapseSkillLines } from "../core/skill-collapse";
 
 const SCOPE_CHANGE_RE =
-  /\b(instead|actually|change of plan|forget that|new task|switch to|now I want|pivot|let'?s do|stop .* and)\b/i;
+  /\b(instead|actually|change of plan|forget that|new task|switch to|now I want|pivot|let'?s do|stop .* and)\b|(?:改(?:一下|成|为)|换成|转而|现在(?:我)?(?:想|要|希望|需要)|接下来|新的?(?:任务|目标)|不再(?:做|使用|处理))/iu;
 
 const TASK_RE =
-  /\b(fix|implement|add|create|build|refactor|debug|investigate|update|remove|delete|migrate|deploy|test|write|set up)\b/i;
+  /\b(fix|implement|add|create|build|refactor|debug|investigate|update|remove|delete|migrate|deploy|test|write|set up)\b|(?:修复|实现|添加|创建|构建|重构|调试|调查|更新|删除|迁移|部署|测试|编写|设置|检查|优化|支持|解决|完善|补充)/iu;
 
 const NOISE_SHORT_RE = /^(ok|yes|no|sure|yeah|yep|go|hi|hey|thx|thanks|ok\b.*|y|n|k)\s*[.!?]*$/i;
 
@@ -33,7 +33,7 @@ const MAX_GOAL_CHARS = 200;
 
 const isSubstantiveGoal = (text: string): boolean => {
   const t = text.trim();
-  if (t.length <= 5) return false;
+  if (t.length < (/\p{Script=Han}/u.test(t) ? 4 : 6)) return false;
   if (t.length > MAX_GOAL_CHARS) return false;
   if (NOISE_SHORT_RE.test(t)) return false;
   if (NON_GOAL_RE.test(t)) return false;
@@ -60,7 +60,7 @@ export const extractGoals = (blocks: NormalizedBlock[]): string[] => {
     const truncated = truncateAtTemplate(rawLines);
     const lines = collapseSkillLines(truncated.filter(isSubstantiveGoal))
       .map(stripLeadingBullet)
-      .filter((l) => l.length > 5);
+      .filter(isSubstantiveGoal);
     if (lines.length === 0) continue;
 
     if (goals.length === 0) {
@@ -71,10 +71,17 @@ export const extractGoals = (blocks: NormalizedBlock[]): string[] => {
     }
 
     const leading = b.text.slice(0, LEADING_CHARS);
+    if (/\p{Script=Han}/u.test(leading)) {
+      if (/[?？]|^(?:是否|如果|假如|不要改|不需要改|不用改)|(?:吗|呢)[。！!]?$/u.test(leading.trim())) continue;
+      // A status report mentioning 修复/测试 is not a new instruction.
+      if (/^(?:修复|实现|添加|创建|重构|调试|调查|更新|删除|迁移|部署|测试|编写|设置|检查|优化|解决|完善|补充)(?:工作|任务)?(?:已经|已)?(?:完成|成功|结束|通过)/u.test(leading.trim())) continue;
+      if (/^(?:请)?(?:不要|不用|不需要)(?:改|修复|添加|删除|部署|测试)/u.test(leading.trim())) continue;
+      if (!/^(?:请|帮我|麻烦|改一下|改成|改为|换成|转而|接下来|现在(?:我)?(?:想|要|希望|需要)|新的?(?:任务|目标)|不再|修复|实现|添加|创建|重构|调试|调查|更新|删除|迁移|部署|测试|编写|设置|检查|优化|解决|完善|补充)/u.test(leading.trim())) continue;
+    }
     if (SCOPE_CHANGE_RE.test(leading)) {
       latestScopeChange = lines.slice(0, 3).map((l) => clip(l, MAX_GOAL_CHARS));
       latestScopeIndex = b.sourceIndex;
-    } else if (TASK_RE.test(leading) && lines[0].length > 15) {
+    } else if (TASK_RE.test(leading) && (/\p{Script=Han}/u.test(leading) || lines[0].length > 15)) {
       latestScopeChange = lines.slice(0, 2).map((l) => clip(l, MAX_GOAL_CHARS));
       latestScopeIndex = b.sourceIndex;
     }

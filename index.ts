@@ -24,6 +24,36 @@ import { Runtime } from "./src/om/runtime.js";
 import { captureRegisteredProviderStreams } from "./src/om/provider-stream.js";
 import { installHostInlineCompactionAdapter } from "./src/om/inline-compaction.js";
 
+const COLLAPSED_DISPLAY_SERVICE = Symbol.for(
+  "@local/pi-collapsed-tools.display-service.v1",
+);
+
+type CollapsedDisplayService = {
+  readonly version: 1;
+  decorate<T extends { name: string }>(tool: T): T;
+};
+
+function withCollapsedDisplay(pi: ExtensionAPI): ExtensionAPI {
+  const target = pi as any;
+  return new Proxy(target, {
+    get(current, property, receiver) {
+      if (property === "registerTool") {
+        return (tool: any) => {
+          const service = (globalThis as any)[COLLAPSED_DISPLAY_SERVICE] as
+            | Partial<CollapsedDisplayService>
+            | undefined;
+          const decorated =
+            service?.version === 1 && typeof service.decorate === "function"
+              ? service.decorate(tool)
+              : tool;
+          return target.registerTool(decorated);
+        };
+      }
+      const member = Reflect.get(current, property, receiver);
+      return typeof member === "function" ? member.bind(current) : member;
+    },
+  });
+}
 export default async (pi: ExtensionAPI) => {
   // Resolve the host's AgentSession identity before this factory returns. Local
   // package development can otherwise patch a duplicate devDependency module.
@@ -92,5 +122,5 @@ export default async (pi: ExtensionAPI) => {
   registerBlackholeExportCommand(pi); // /blackhole-export [out:<path>]
 
   // Tools
-  registerRecallTool(pi, omRuntime); // unified recall (#N + [12char]), budget-capped
+  registerRecallTool(withCollapsedDisplay(pi), omRuntime); // unified recall (#N + [12char]), budget-capped and collapsed
 };

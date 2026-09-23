@@ -27,10 +27,27 @@ import { effectiveContextWindow } from "../om/model-budget.js";
 import { DEFAULTS, configFileNeedsMigration } from "../core/unified-config.js";
 import { buildRetainedToolOutputProjection } from "../core/tool-output-budget.js";
 import { buildGlobalIndexById, loadGlobalIndexById } from "../core/global-indices.js";
+import { estimateEntryTokens } from "../om/tokens.js";
 import { loadGitFileTags } from "../extract/git-status.js";
 import { collectFilesTouched } from "../extract/file-touch.js";
 
 export const PI_VCC_COMPACT_INSTRUCTION = "__pi_vcc__";
+
+export const UI_COMPACTION_SUMMARY =
+  "Blackhole compacted earlier context. Full summary is retained internally.";
+
+export function readStoredFullSummary(entry: any): string | undefined {
+  const value = entry?.details?.blackholeFullSummary;
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+export function latestCompactionEntry(entries: any[]): any | undefined {
+  if (!Array.isArray(entries)) return undefined;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i]?.type === "compaction") return entries[i];
+  }
+  return undefined;
+}
 
 // ── Migration reminder ────────────────────────────────────────────────────────
 
@@ -533,40 +550,17 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
     const sourceIndices =
       globalIndexById === undefined ? undefined : convertedWithIndices.map((x) => x.sourceIndex);
 
-    // Count kept messages and estimate tokens
+
     const keptIdx = (branchEntries as any[]).findIndex((e: any) => e.id === firstKeptEntryId);
     const keptEntries =
       keptIdx >= 0
         ? (branchEntries as any[]).slice(keptIdx).filter((e: any) => e.type === "message")
         : [];
-    const keptChars = keptEntries.reduce((sum: number, e: any) => {
-      const c = e.message?.content;
-      if (typeof c === "string") return sum + c.length;
-      if (Array.isArray(c))
-        return (
-          sum +
-          c.reduce((s: number, p: any) => {
-            if (p.text) return s + p.text.length;
-            if (p.type === "toolCall")
-              return (
-                s +
-                (p.name?.length ?? 0) +
-                (typeof p.input === "string"
-                  ? p.input.length
-                  : JSON.stringify(p.input ?? "").length)
-              );
-            if (p.type === "toolResult")
-              return (
-                s +
-                (typeof p.content === "string"
-                  ? p.content.length
-                  : JSON.stringify(p.content ?? "").length)
-              );
-            return s;
-          }, 0)
-        );
-      return sum;
-    }, 0);
+    // Count kept messages using the same host-aware/CJK-safe estimator as OM.
+    const keptTokensEst = keptEntries.reduce(
+      (sum: number, entry: any) => sum + estimateEntryTokens(entry),
+      0,
+    );
     const totalUserTurns = (branchEntries as any[]).filter(
       (e: any) => e.type === "message" && e.message?.role === "user",
     ).length;
@@ -578,7 +572,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
     omRuntime.compactionStats = {
       summarized: agentMessages.length,
       kept: keptEntries.length,
-      keptTokensEst: Math.round(keptChars / 4),
+      keptTokensEst,
       compactAll: ownCut.compactAll,
       totalUserTurns,
       keptUserTurns,
@@ -589,6 +583,10 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
       smartFromKeep: 1,
     };
 
+    const previousCompaction = latestCompactionEntry(branchEntries as any[]);
+    const effectivePreviousSummary =
+      readStoredFullSummary(previousCompaction) ?? preparation.previousSummary;
+
     const fileOps = {
       readFiles: [...preparation.fileOps.read],
       modifiedFiles: [...preparation.fileOps.written, ...preparation.fileOps.edited],
@@ -598,7 +596,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
     const gitTags = loadGitFileTags(ctx.cwd ?? process.cwd());
     const summary = compile({
       messages,
-      previousSummary: preparation.previousSummary,
+      previousSummary: effectivePreviousSummary,
       fileOps,
       sourceIndices,
       touchMessages: agentMessages,
@@ -699,7 +697,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
       version: 1,
       sections: [...summary.matchAll(/^\[(.+?)\]/gm)].map((m) => m[1]),
       sourceMessageCount: agentMessages.length,
-      previousSummaryUsed: Boolean(preparation.previousSummary),
+      previousSummaryUsed: Boolean(effectivePreviousSummary),
       retainedToolOutputProjection,
     };
 
@@ -759,7 +757,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
       const aggregateSummary = stripRecallNotes(stripOMContent(summary)).trim();
       const hasPriorCompaction = branchEntries.some((entry) => entry.type === "compaction");
       const hasCompletePreviousSummary =
-        !hasPriorCompaction || Boolean(preparation.previousSummary);
+        !hasPriorCompaction || Boolean(effectivePreviousSummary);
       if (
         currentCoverage &&
         freshSegmentSummary.trim().length > 0 &&
@@ -818,13 +816,26 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
         );
       }
     }
+    const isRpcMode = ctx?.mode === "rpc";
+    const resultCompaction: {
+      summary: string;
+      details: Record<string, unknown>;
+      tokensBefore: number;
+      firstKeptEntryId: string;
+    } = {
+      summary: fallbackSummary,
+      details: { ...details, "om.folded": omDetails },
+      tokensBefore: preparation.tokensBefore,
+      firstKeptEntryId,
+    };
+
+    if (isRpcMode) {
+      resultCompaction.details.blackholeFullSummary = fallbackSummary;
+      resultCompaction.summary = UI_COMPACTION_SUMMARY;
+    }
+
     return {
-      compaction: {
-        summary: fallbackSummary,
-        details: { ...details, "om.folded": omDetails },
-        tokensBefore: preparation.tokensBefore,
-        firstKeptEntryId,
-      },
+      compaction: resultCompaction,
     };
   });
 

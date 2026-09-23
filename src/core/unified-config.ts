@@ -133,6 +133,8 @@ export interface UnifiedConfig {
    *  stored message cannot flood the context. Per-entry and per-line share a
    *  derived slice of this budget; 0 = unbounded (opt-out). */
   recallResponseMaxChars: number;
+  /** Independent estimated-token recall ceiling; 0 disables only this limit. */
+  recallResponseMaxTokens: number;
 
   /** Token threshold for observer runs. */
   observeAfterTokens: number;
@@ -276,6 +278,7 @@ export const DEFAULTS: UnifiedConfig = {
   showPreCompactionMessage: true,
   retainedToolOutputMaxTokens: 20_000,
   recallResponseMaxChars: 48_000,
+  recallResponseMaxTokens: 12_000,
   midRunCompaction: "off",
 
   observeAfterTokens: 15_000,
@@ -568,6 +571,7 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
     "reflectAfterTokens",
     "retainedToolOutputMaxTokens",
     "recallResponseMaxChars",
+    "recallResponseMaxTokens",
     "observationsPoolMaxTokens",
     "reflectionsPoolMaxTokens",
     "observationsPoolTargetTokens",
@@ -609,6 +613,7 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
       k === "providerIdleTimeoutMs" ||
       k === "retainedToolOutputMaxTokens" || // 0 = disabled (opt-in)
       k === "recallResponseMaxChars" || // 0 = unbounded (opt-out)
+      k === "recallResponseMaxTokens" || // independent opt-out
       k === "reflectionsPoolMaxTokens" // 0 = uncapped
         ? nonNegativeInt
         : positiveInt;

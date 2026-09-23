@@ -6,6 +6,7 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { copyTextToClipboard } from "../om/clipboard.js";
+import { estimateStringTokens } from '../om/tokens.js';
 import {
   BUILTIN_PRESETS,
   autoCompactThreshold,
@@ -77,8 +78,8 @@ function compactThresholdSuffix(cfg: CompactThresholdConfig, window: number): st
   return ` · ${Math.round(ratio * 100)}% of ${window.toLocaleString()}-token window (preset: ${name})`;
 }
 
-function tokenSum(items: { tokenCount: number }[]): number {
-  return items.reduce((sum, item) => sum + item.tokenCount, 0);
+function tokenSum(items: { content: string }[]): number {
+  return items.reduce((sum, item) => sum + estimateStringTokens(item.content), 0);
 }
 
 function addedSuffix(count: number): string | undefined {
@@ -161,7 +162,7 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
       const drift = diffProjection(visible, full);
 
       const observationPoolTokens = folded.activeObservations.reduce(
-        (sum, o) => sum + (o.tokenCount ?? 0),
+        (sum, o) => sum + estimateStringTokens(o.content),
         0,
       );
       const visibleReflectionTokens = tokenSum(visible.reflections);
