@@ -37,5 +37,5 @@
 
 ## 文件与风险边界
 
-- 全量 JSON：`R:/Temp/blackhole-sync-a00bf11.json`；日志：`R:/Temp/blackhole-sync-a00bf11.log`。
+- 全量 JSON 与日志曾在 `R:/Temp/blackhole-sync-a00bf11.*`（内存盘，重启后已不存在）；结论以本文件为准。
 - 未调用远程模型，未压缩真实会话，未重建历史记忆。需要完全重启 pi 验证交互运行。

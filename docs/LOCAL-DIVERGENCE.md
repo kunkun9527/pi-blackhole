@@ -186,7 +186,7 @@
 
 - 入口 `index.ts`（上游 0.5.8 起为 `dist/index.js`）；本地不构建 dist。
 - `package.json`：`private`，名称 `pi-blackhole-local`，版本 `<上游版本>-dev.<commit>.local.<n>`，`blackholeUpstream.commit` 记录基线；pi 依赖为 peerDependencies 0.87.0，通过 `scripts/link-host.mjs` 链接全局 pi。
-- `scripts/`：`smoke-host.mjs`（真实加载器）、`probe-inline-host.ts`（inline 压缩宿主探测）、`deploy-local.py`（部署）。
+- `scripts/`：`smoke-host.mjs`（真实加载器）、`probe-inline-host.ts`（inline 压缩宿主探测）、`deploy-local.py`（部署，只能从整合树运行）、`bootstrap-workspace.sh`（R 盘内存盘清空后重建工作区）。
 - `tests/`：本地 bun 测试；上游 vitest 测试放在整合树 `upstream-tests/`，不部署。
 - 安装目录文件为 CRLF；整合树 `core.autocrlf=true`。
 - 其他估算替换：`before-compact.ts` 的 `keptTokensEst`（上游为字符数 ÷ 4）、`core/compaction-chain.ts` 的压缩后估算（上游为宿主 `estimateTokens`）都改用 `estimateEntryTokens`。
