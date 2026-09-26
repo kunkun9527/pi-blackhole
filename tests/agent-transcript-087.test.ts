@@ -38,12 +38,13 @@ for (const stage of ['observer', 'reflector', 'dropper'] as const) {
 
 test('transcript budget includes tool schemas and named system sections', () => {
   let calls = 0;
-  const guard = budgetedStream(() => { calls++; }, 1000);
   for (const extra of [
     { toolsAdded: [{ name: 'large', description: '中文'.repeat(2000), parameters: {} }] },
     { sections: { instructions: '中文'.repeat(2000) } },
   ]) {
-    assert.throws(() => guard(model, { messages: [{ role: 'system', content: '', ...extra, timestamp: 0 }] }, {}), InputBudgetError);
+    const guard = budgetedStream(() => { calls++; }, 1000);
+    guard(model, { messages: [{ role: 'system', content: '', ...extra, timestamp: 0 }] }, {});
+    assert.ok(guard.error instanceof InputBudgetError);
   }
   assert.equal(calls, 0);
 });

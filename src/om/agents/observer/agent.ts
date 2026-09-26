@@ -25,7 +25,7 @@ import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
 import { agentCompletionError, initialInputLimit } from '../../input-budget.js';
-import { agentInputLimit, agentInputTokens, boundedContext, budgetedStream, InputBudgetError, userPrompt, type InputBudgetOptions } from '../../input-budget.js';
+import { agentContextLimit, agentInputLimit, agentInputTokens, boundedContext, budgetedStream, InputBudgetError, userPrompt, type InputBudgetOptions } from '../../input-budget.js';
 import { serializeSourceAddressedBranchEntries, type RenderableEntry } from '../../serialize.js';
 
 interface RunObserverArgs extends InputBudgetOptions {
@@ -357,7 +357,7 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
   // other extensions (e.g., claude-bridge). The bridge looks up streamSimple functions
   // via modelRegistry (host-composed facade → registered provider config → global map).
   const bridgeStreamFn = createBridgeStreamFn(streamSimple, args.modelRegistry);
-  const streamFn = budgetedStream(args.streamFn ?? bridgeStreamFn, limit);
+  const streamFn = budgetedStream(args.streamFn ?? bridgeStreamFn, agentContextLimit(model, args));
   const stream = loop(prompts, context, config, signal, streamFn);
   let agentError: string | undefined;
   for await (const event of stream) {

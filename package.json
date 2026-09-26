@@ -1,6 +1,6 @@
 {
   "name": "pi-blackhole-local",
-  "version": "0.5.9-dev.a621e01.local.1",
+  "version": "0.5.9-dev.a621e01.local.2",
   "private": true,
   "description": "Pi Blackhole dev a621e01 (0.5.9) with Chinese safety, bounded recall, lossless batching and Pi 0.87 compatibility",
   "license": "MIT",

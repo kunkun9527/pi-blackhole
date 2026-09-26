@@ -1,3 +1,4 @@
+import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { estimateEntryTokens, estimateStringTokens } from './tokens.js';
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from './model-budget.js';
 
@@ -60,17 +61,45 @@ export function planInputBatches<T>(items: readonly T[], fits: (batch:T[])=>bool
   return batches;
 }
 
-/** Recheck every agent-loop turn, not only its initial request. */
+/**
+ * Hard per-turn ceiling: the model window minus output and safety reserve.
+ * The configured `*InputMaxTokens` only sizes the initial source batch (see
+ * `initialInputLimit`); tool calls and receipts may legitimately grow later
+ * turns past it, and failing them would re-fail the same chunk every cycle.
+ */
+export function agentContextLimit(model: any, options: InputBudgetOptions): number {
+  return agentInputLimit(model, { contextWindow: options.contextWindow }, Number.POSITIVE_INFINITY);
+}
+
+/**
+ * Recheck every agent-loop turn against the model window before it reaches the
+ * provider. A refusal is returned as an error stream, never thrown: pi 0.87 runs
+ * the loop as `void runAgentLoop(...)` without a catch, so a throw here becomes
+ * an unhandled rejection that terminates the host process. The loop then ends
+ * with `stopReason: "error"` and the caller rethrows `guarded.error`.
+ */
 export function budgetedStream(stream: (...args:any[])=>any, limit:number) {
   const guarded: ((...args:any[])=>any) & {error?:InputBudgetError} = (model:any, context:any, options:any) => {
     const tokens=agentInputTokens(context.systemPrompt ?? '',context.tools ?? [],context.messages ?? []);
     if (tokens>limit) {
-      guarded.error = new InputBudgetError(`Agent input estimate ${tokens} exceeds budget ${limit}; original retained and coverage not advanced.`);
-      throw guarded.error;
+      guarded.error = new InputBudgetError(`Agent input estimate ${tokens} exceeds context budget ${limit}; original retained and coverage not advanced.`);
+      return refusalStream(model, guarded.error.message);
     }
     return stream(model,context,options);
   };
   return guarded;
+}
+
+function refusalStream(model: any, errorMessage: string) {
+  const message: AssistantMessage = {
+    role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: 'error', errorMessage, timestamp: Date.now(),
+  };
+  const stream = createAssistantMessageEventStream();
+  stream.push({ type: 'error', reason: 'error', error: message });
+  stream.end(message);
+  return stream;
 }
 
 /**

@@ -105,7 +105,9 @@
 - `agentInputLimit(model, {inputMaxTokens, contextWindow}, fallback)` = `min(inputMaxTokens, 窗口 − boundedMaxTokens(model) − 1024)`；各阶段传入 `observerChunkMaxTokens` / `reflectorInputMaxTokens` / `dropperInputMaxTokens`。
 - `initialInputLimit` = limit × 0.8，为工具调用和后续轮次留余量。
 - `agentInputTokens` 按最终请求计：系统提示 + 工具 schema JSON + 128 + 每条消息 16 + 条目估算。
-- `budgetedStream` 包装 stream：**每一轮请求**发出前复查（pi 0.87 下系统提示和工具声明在首条 system 消息的 `toolsAdded`/`sections` 里，由宿主估算计入），超限抛 `InputBudgetError`。
+- `budgetedStream` 包装 stream：**每一轮请求**发出前复查（pi 0.87 下系统提示和工具声明在首条 system 消息的 `toolsAdded`/`sections` 里，由宿主估算计入）。
+  - 上限是 `agentContextLimit`，即模型窗口减去输出预留和 1024 安全余量，**不是**配置的 `*InputMaxTokens`。配置预算只限制首轮源输入（`initialInputLimit`，80%）。后续轮次里 tool call 和回执本来就会让上下文超过它；如果按配置预算拦截，同一段内容每个周期都会失败，cursor 永远不前进。
+  - 超限时**返回** `stopReason: "error"` 的错误流，把 `InputBudgetError` 记在 `guarded.error`，由 agent 在循环结束后重新抛出。**绝不能在 stream 函数里 throw**：pi 0.87 的 `agentLoop` 是 `void runAgentLoop(...).then(...)`，没有 catch，throw 会变成未处理的 Promise rejection，直接结束 pi 进程（0.5.9-dev.a621e01.local.2 修复，回归测试见 `tests/budget-stream-crash.test.ts`）。
 - `boundedContext` 裁剪先前记忆，保留整行并加省略标记；源记录本身永不裁剪。
 - `planInputBatches` 在首次模型调用前规划全部批次；任何单项放不下立即抛错。
 

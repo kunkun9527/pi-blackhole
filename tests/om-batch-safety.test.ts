@@ -64,9 +64,10 @@ test('dropper final global cap is not multiplied by number of batches',async()=>
 
 test('budget errors survive agent-loop conversion into assistant error messages',async()=>{
   const loop=loopWith(async(_prompts,ctx,streamFn)=>{
-    try { streamFn(model,{...ctx,messages:[{role:'user',content:'中文'.repeat(10000)}]},{}); }
-    catch(e) { return [{stopReason:'error',errorMessage:String(e)}]; }
-    throw new Error('expected input refusal');
+    // pi 0.87 does not catch stream-function throws; the refusal must arrive as an error stream.
+    const refused=await streamFn(model,{...ctx,messages:[{role:'user',content:'中文'.repeat(10000)}]},{}).result();
+    assert.equal(refused.stopReason,'error');
+    return [refused];
   });
   await assert.rejects(runReflector({model,apiKey:'offline',inputMaxTokens:7000,observations:[obs(1)],reflections:[],agentLoop:loop,streamFn:noNetwork}),InputBudgetError);
 });

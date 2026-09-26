@@ -84,8 +84,13 @@ test('observer planner accounts for wrappers, prior context and output reserve',
 
 test('each subsequent stream request is checked before reaching provider',()=>{
   let calls=0;const guarded=budgetedStream(()=>{calls++;return null;},1000);
-  assert.throws(()=>guarded(model,{messages:[{role:'user',content:'中文'.repeat(1000)}]},{}),InputBudgetError);
+  const refused=guarded(model,{messages:[{role:'user',content:'中文'.repeat(1000)}]},{});
+  assert.ok(guarded.error instanceof InputBudgetError);
   assert.equal(calls,0);
+  return refused.result().then((message:any)=>{
+    assert.equal(message.stopReason,'error');
+    assert.match(message.errorMessage,/exceeds context budget 1000/);
+  });
 });
 
 test('a failure after recording partial observations must not report successful coverage',async()=>{

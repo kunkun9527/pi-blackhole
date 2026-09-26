@@ -23,6 +23,7 @@ import { reflectionToSummaryLine, type Observation, type Reflection } from "../.
 import { DROPPER_SYSTEM } from "./prompts.js";
 import { agentCompletionError, initialInputLimit } from "../../input-budget.js";
 import {
+  agentContextLimit,
   agentInputLimit,
   agentInputTokens,
   boundedContext,
@@ -414,7 +415,7 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   const loop = args.agentLoop ?? agentLoop;
   // ── Bridge stream function ──
   const bridgeStreamFn = createBridgeStreamFn(streamSimple, args.modelRegistry);
-  const streamFn = budgetedStream(args.streamFn ?? bridgeStreamFn, limit);
+  const streamFn = budgetedStream(args.streamFn ?? bridgeStreamFn, agentContextLimit(model, args));
   const stream = loop(prompts, context, config, signal, streamFn);
   let agentError: string | undefined;
   for await (const event of stream) {

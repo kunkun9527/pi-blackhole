@@ -23,7 +23,7 @@ import { truncateRecordContent } from "../../serialize.js";
 import { REFLECTOR_SYSTEM } from "./prompts.js";
 import { estimateStringTokens } from "../../tokens.js";
 import { agentCompletionError, initialInputLimit } from '../../input-budget.js';
-import { agentInputLimit, agentInputTokens, boundedContext, budgetedStream, planInputBatches, userPrompt, type InputBudgetOptions } from '../../input-budget.js';
+import { agentContextLimit, agentInputLimit, agentInputTokens, boundedContext, budgetedStream, planInputBatches, userPrompt, type InputBudgetOptions } from '../../input-budget.js';
 import {
   observationToSummaryLine,
   reflectionToSummaryLine,
@@ -274,7 +274,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
   const loop = args.agentLoop ?? agentLoop;
   // ── Bridge stream function ──
   const bridgeStreamFn = createBridgeStreamFn(streamSimple, args.modelRegistry);
-  const streamFn = budgetedStream(args.streamFn ?? bridgeStreamFn, limit);
+  const streamFn = budgetedStream(args.streamFn ?? bridgeStreamFn, agentContextLimit(model, args));
   const stream = loop(prompts, context, config, signal, streamFn);
   let agentError: string | undefined;
   for await (const event of stream) {
