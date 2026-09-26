@@ -73,10 +73,22 @@ export function budgetedStream(stream: (...args:any[])=>any, limit:number) {
   return guarded;
 }
 
-/** Interrupted/tool-limit responses do not prove full source coverage. */
-export function agentCompletionError(messages: readonly any[], signal?:AbortSignal): string | undefined {
+/**
+ * Interrupted/tool-limit responses do not prove full source coverage.
+ *
+ * `completedByTool`: the final tool batch returned `terminate` (upstream 0.5.9
+ * `complete=true` early stop). pi's loop then ends right after that tool result,
+ * so the last assistant message legitimately carries `stopReason: "toolUse"`.
+ * Only that case is accepted; error/aborted/length still fail.
+ */
+export function agentCompletionError(
+  messages: readonly any[],
+  signal?: AbortSignal,
+  completedByTool = false,
+): string | undefined {
   if (signal?.aborted) return 'aborted';
   const last = [...messages].reverse().find(message => typeof message?.stopReason === 'string');
+  if (last?.stopReason === 'toolUse' && completedByTool) return undefined;
   if (last && ['error','aborted','length','toolUse'].includes(last.stopReason)) {
     return last.errorMessage ?? `Incomplete agent response (${last.stopReason}); coverage not advanced.`;
   }

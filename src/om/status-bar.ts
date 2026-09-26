@@ -20,7 +20,7 @@
  * config-file read, preset-curve copy, token-estimation mirror, and
  * threshold-inference blocks are all replaced by in-repo sources of truth.
  */
-import type { ExtensionAPI, ThemeColor } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Runtime, ConsolidationPhase } from "./runtime.js";
 import {
   foldLedger,
@@ -39,7 +39,7 @@ const GAUGE_CELLS = 8;
 // Fraction of a gauge's max at which it starts warning (orange).
 const WARN_FRACTION = 0.8;
 
-type ThemeShim = { fg: (style: ThemeColor, text: string) => string };
+type ThemeShim = { fg: (style: string, text: string) => string };
 const EMPTY_THEME: ThemeShim = { fg: (_style, text) => text };
 
 type WorkerType = ConsolidationPhase | "compact";
@@ -97,7 +97,7 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     const filled = Math.min(GAUGE_CELLS, Math.round(Math.min(1.2, frac) * GAUGE_CELLS));
     // Fill tiers: dim under WARN_FRACTION, warning (orange in default themes)
     // as it nears the trigger, error (red) at or above 100%.
-    let color: ThemeColor = "dim";
+    let color = "dim";
     if (frac >= 1) color = "error";
     else if (frac >= WARN_FRACTION) color = "warning";
     return (
@@ -294,8 +294,7 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
   }
 
   pi.on("session_start", (_event, ctx) => {
-    // Headless SDK contexts expose a UI shim whose theme getter may throw.
-    ui = ctx.hasUI ? ctx.ui : undefined;
+    ui = ctx.hasUI !== false ? (ctx.ui as StatusBarUi | undefined) : undefined;
     model = ctx.model;
     lastCtx = ctx as BranchCtx;
     clearWorkers();

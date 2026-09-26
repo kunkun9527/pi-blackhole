@@ -15,6 +15,7 @@ import type { SearchHit } from "../core/search-entries";
 import { formatRecallEntry, formatTouchedOutput } from "../core/format-recall";
 import {
   capRecallBlocks,
+  capDrillDownText,
   capRecallText,
   DEFAULT_RECALL_RESPONSE_MAX_TOKENS,
   expandAllocation,
@@ -22,7 +23,7 @@ import {
 } from "../core/recall-budget";
 import { getActiveLineageEntryIds } from "../core/lineage";
 import { normalizeRecallScope, normalizeRecallMode } from "../core/recall-scope";
-import { parseDrillDown, expandEntryFile } from "../core/drill-down.js";
+import { parseDrillDown, expandEntryFileDetailed } from "../core/drill-down.js";
 import { recallMemorySources, type Entry } from "../om/ledger/recall.js";
 import { renderRecallSourceEntries } from "../om/serialize.js";
 import {
@@ -484,9 +485,24 @@ export function registerRecallTool(
               };
             }
           }
-          const text = expandEntryFile(sessionFile, parsed.index, parsed.pathPattern, parsed.full, parsed.offset, parsed.limit);
+          const expanded = expandEntryFileDetailed(
+            sessionFile,
+            parsed.index,
+            parsed.pathPattern,
+            parsed.full,
+            parsed.offset,
+            parsed.limit,
+          );
+          const text = capDrillDownText({
+            text: expanded.text,
+            paging: expanded.paging,
+            index: parsed.index,
+            pathPattern: parsed.pathPattern,
+            maxChars,
+            maxTokens,
+          });
           return {
-            content: [{ type: "text" as const, text: capRecallText(text, maxChars, maxTokens, `Use #${parsed.index}:${parsed.pathPattern}:offset:limit with smaller line ranges.`) }],
+            content: [{ type: "text" as const, text }],
             details: undefined,
           };
         }

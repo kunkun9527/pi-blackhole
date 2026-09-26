@@ -24,7 +24,7 @@ test('observer never moves coverage past unseen source entries',async()=>{
   const entries:any[]=Array.from({length:3},(_,i)=>({id:'s'+i,type:'message',message:{role:'user',content:'中文'.repeat(800),timestamp:0}}));
   const seen:string[]=[]; const errors:Error[]=[]; let cursor:any;
   const runtime:any={config:{...DEFAULTS,compaction:'auto',observeAfterTokens:3000,observerChunkMaxTokens:8000},
-    isGenerationActive:()=>true,getCursor:()=>cursor,advanceCursor:(_s:any,id:string,state:string)=>{cursor={entryId:id,state};},
+    isGenerationActive:()=>true,tryEmitWorkerInfo:()=>{},getCursor:()=>cursor,advanceCursor:(_s:any,id:string,state:string)=>{cursor={entryId:id,state};},
     tryEmitInfo:()=>{},findCandidateConfig:()=>undefined,recordRetryableError:(_c:any,e:any)=>{throw e;},recordDeterministicError:()=>{},recordConsolidationStageError:(_c:any,_s:any,e:Error)=>errors.push(e)};
   const writes:any[]=[]; const pi:any={appendEntry:(customType:string,data:any)=>{
     writes.push(data); entries.push({id:'marker'+writes.length,type:'custom',customType,data});
@@ -36,12 +36,12 @@ test('observer never moves coverage past unseen source entries',async()=>{
     return {observations:[{...observation(seen.length,'observed '+args.allowedSourceEntryIds[0]),sourceEntryIds:args.allowedSourceEntryIds}]};
   };
   // One invocation must drain the backlog, including a final chunk below the trigger threshold.
-  await runObserverStage(pi,runtime,ctx,generation,async()=>({ok:true,model,apiKey:'offline'}),fakeAgent);
+  await runObserverStage(pi,runtime,ctx,generation,async()=>({ok:true,source:'session' as const,model,apiKey:'offline'}),fakeAgent);
   assert.deepEqual(errors,[]);assert.deepEqual(seen,['s0','s1','s2']);assert.equal(cursor.entryId,'s2');
   assert.equal(writes[0].coversUpToId,'s0');
   const before=cursor;
   entries.push({id:'oversized',type:'message',message:{role:'user',content:'中文'.repeat(10000),timestamp:0}});
-  assert.equal(await runObserverStage(pi,runtime,ctx,generation,async()=>({ok:true,model,apiKey:'offline'}),fakeAgent),'abort');
+  assert.equal(await runObserverStage(pi,runtime,ctx,generation,async()=>({ok:true,source:'session' as const,model,apiKey:'offline'}),fakeAgent),'abort');
   assert.equal(cursor,before);assert.equal(errors.length,1);assert.match((errors[0] as Error).message,/retained.*not advanced/);
 });
 

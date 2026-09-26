@@ -76,6 +76,9 @@ test('aborted, output-limited and unfinished tool responses are not completed co
     assert.ok(agentCompletionError([{role:'assistant',stopReason},{role:'toolResult',content:[]}]),stopReason);
   }
   assert.equal(agentCompletionError([{role:'assistant',stopReason:'stop'}]),undefined);
+  // 0.5.9 complete=true early stop ends on toolUse; only a terminating tool batch may pass.
+  assert.equal(agentCompletionError([{role:'assistant',stopReason:'toolUse'}],undefined,true),undefined);
+  assert.match(agentCompletionError([{role:'assistant',stopReason:'error',errorMessage:'boom'}],undefined,true)??'',/boom/);
 });
 
 test('manual-mode pending batches preserve every source without live-session writes',()=>{

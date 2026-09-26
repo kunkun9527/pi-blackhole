@@ -2,8 +2,9 @@
 
 本文件是本地版 `pi-blackhole-local` 与上游 `k0valik/pi-blackhole` 所有行为差异的单一事实来源。以下三种情况必须先读本文件：解决合并冲突、修改下表涉及的文件、判断某个上游测试失败是不是预期。
 
-- 对照基线：上游 dev `a00bf11`（0.5.8 之后）。对比命令：`git diff a00bf11 main -- src index.ts ':!*.test.ts'`（整合树 `R:/pi-blackhole-integration`）。
-- 差异规模：26 个源码文件，+770 / −815 行，新增文件仅 `src/om/input-budget.ts`。
+- 对照基线：上游 dev `a621e01`（v0.5.9）。对比命令：`git diff a621e01 main -- src index.ts ':!*.test.ts'`（整合树 `R:/pi-blackhole-integration`）。
+- 差异规模：25 个源码文件，+835 / −830 行，新增文件仅 `src/om/input-budget.ts`。
+- 上游全量 vitest 在该基线下 2328 / 2349 通过，21 项失败全部是下文登记的「上游预期失败」。
 - 同步、验收、部署流程见根目录 `LOCAL-MAINTENANCE.md`。
 
 ## 总览
@@ -20,7 +21,7 @@
 | D8 | recall 字符与 token 双上限 | 本地增强 | recall 工具所有输出 |
 | D9 | RPC 模式简短摘要与完整摘要恢复 | 本地增强 | RPC 模式压缩 |
 | D10 | recall 折叠显示接入 | 本地集成 | recall 工具注册 |
-| D11 | 状态栏无 UI 时停用；ThemeColor 类型 | 兼容 | 状态栏 |
+| ~~D11~~ | 状态栏无 UI 时停用（0.5.9 起已回归上游） | — | — |
 | D12 | 打包与工程 | 工程 | 入口、依赖、测试 |
 
 ---
@@ -58,7 +59,11 @@
 
 **测试**：`tests/om-batch-safety.test.ts`（legacy tokenCount 不驱动池压力和覆盖统计）。
 
-**上游预期失败**：`upstream-tests/pool-consistency.test.ts` 6 项（fixture 的 tokenCount 与 content 长度不一致）。三个调用方仍共用同一 helper，一致性不受影响。
+0.5.9 起 `livePoolObservations()`（ID 去重、pending drop 墓碑）由上游提供，本地只替换其上的 token 求和；dropper 压力基准改为 `observationsPoolMaxTokens`（上游修复）也已采用。
+
+**上游预期失败**（fixture 写了很大的 `tokenCount`，content 却只有十几个字符，本地按 content 算出的池很小，达不到压力阈值）：
+- `upstream-tests/pool-consistency.test.ts` 12 项。三个调用方仍共用同一 helper，一致性不受影响。
+- `upstream-tests/consolidation.test.ts`「dropper pressure valve」6 项（fullness floor、全池压力、空结果不重试、池变化重新触发、manual 压力）和「showWorkerNotifications」dropper 2 项。把 progress.ts 与 dropper/agent.ts 临时改回 `tokenCount` 时这 8 项全部通过（2026-09-26 验证），说明压力逻辑本身已与上游一致。
 
 **合并注意**：上游新增任何 `reduce(... o.tokenCount ...)` 都要改成按 content 重算；搜索 `tokenCount` 复查。
 
@@ -88,6 +93,8 @@
 
 **实现**（`src/om/input-budget.ts` `agentCompletionError`，三个 agent 共用）：最后一条带 `stopReason` 的消息为 `error`、`aborted`、`length`、`toolUse`（轮数用尽仍想调工具）或 signal 已中止时，整个运行抛错，不返回部分结果；`budgetedStream` 记录的预算错误同样抛出。
 
+**例外（0.5.9 早停）**：`record_observations` / `record_reflections` 带 `complete=true` 且本批无拒收时返回 `terminate`，pi 在该工具结果后直接结束循环，最后一条 assistant 消息的 `stopReason` 仍是 `toolUse`。agent 把「最近一批是否 terminate」传给 `agentCompletionError(msgs, signal, completedByTool)`，只有这种情况放行；`error`、`aborted`、`length` 照常抛错。
+
 **代价**：一批需要超过 `agentMaxTurns`（默认 16）轮才能处理完时会整批失败，下次触发重试同一批，产生重复调用。遇到这种日志时先调大 `agentMaxTurns` 或调小 `observerChunkMaxTokens`。
 
 **测试**：`tests/agent-turn-limit-087.test.ts`、`tests/om-batch-safety.test.ts`（中止、输出截断、未完成工具响应不算完成）、`tests/om-input-budget.test.ts`（部分记录后失败不得报告成功）。
@@ -106,17 +113,20 @@
 - reflector（`reflector/agent.ts`）：多批时逐批递归调用；同 id 反思合并 `supportingObservationIds`；任何一批失败，整次结果作废。
 - dropper（`dropper/agent.ts`）：多批时传 `batchPressure {tokens, maxDrops}`，子批沿用整池压力，不按子批重算；汇总后用 `selectDropCandidates` 再施加一次全局上限。
 - 先前记忆上下文上限为 limit 的 10%（上游 reflector 为 15%×2、dropper 20%）。
-- consolidation 里删除了上游基于 `AGENT_LOOP_RESERVE = 8000` 的窗口预检和「跳到下一个候选模型」逻辑，改由 agent 内部精确规划。
+- consolidation 里删除了上游基于 `AGENT_LOOP_RESERVE = 8000` 的窗口预检和「跳到下一个候选模型」逻辑，改由 agent 内部精确规划。0.5.9 的 dropper 压力运行会把整个活动池作为候选，本地由 `planInputBatches` 分批，不需要换更大窗口的模型。
+- 0.5.9 的 `runWorkerAttempt`（`workerAttemptTimeoutMs` 硬超时）和 `cacheRetention` 已接入三个阶段；本地 `InputBudgetError` 分支放在上游的 generation 检查之后。
 
 **提示词措辞与上游不同**（维护时注意，影响输出质量对比）：
-- observer 用户提示改为 `observerText()`，工具描述改为 `OBSERVER_TOOL_DESCRIPTION`，语义等价但措辞更短。
-- reflector 把「NEW REFLECTIONS TO PROCESS」并入「EXISTING REFLECTIONS (context only)」，只把新观察作为处理对象（便于只对观察分批）。这是与上游的语义差异：新反思不再被要求二次提炼。
+- observer 用户提示由 `observerText()` 生成、工具描述为 `OBSERVER_TOOL_DESCRIPTION`（供 `prepareObserverInput` 按真实布局计量）；0.5.9 起两者文字与上游逐字相同，含 `complete` 说明。
+- reflector 末尾的 `complete` 指令与上游逐字相同；但把「NEW REFLECTIONS TO PROCESS」并入「EXISTING REFLECTIONS (context only)」，只把新观察作为处理对象（便于只对观察分批）。这是与上游的语义差异：新反思不再被要求二次提炼。
 - dropper 标题改为「CURRENT REFLECTIONS (context only)」「EXISTING ACTIVE OBSERVATIONS (context only, not drop candidates)」。
 - 系统提示（`prompts.ts`）与上游一致。
 
 **测试**：`tests/om-input-budget.test.ts`、`tests/om-batch-safety.test.ts`、`tests/agent-transcript-087.test.ts`（真实 0.87 agentLoop 下系统指令和工具声明送达 provider，预算计入 schema 和 sections）。
 
-**上游预期失败**：`dropper.test.ts` 旧提示词字面量、`lazy-workers.test.ts` 整模块 mock 缺 `prepareObserverInput`（整合树已适配）。
+**上游预期失败**：`consolidation.test.ts`「skips an undersized primary model for an uncapped pressure prompt and uses fallback」（本地没有窗口预检，见上）。`dropper.test.ts` 旧提示词字面量、`lazy-workers.test.ts` 整模块 mock 缺 `prepareObserverInput` 已在整合树适配。
+
+**测试适配**：`upstream-tests/consolidation.test.ts` 的 observer mock 用 `importOriginal` 保留 `prepareObserverInput`，首次加载有真实 I/O；「worker attempt hard timeout」用例在 `vi.useFakeTimers()` 之前先预热该模块，否则超时计时器在测试推进假时钟之后才建立。
 
 **合并注意**：上游改三个 agent 文件时，保留本地的 `limit / render / planInputBatches / budgetedStream / agentCompletionError` 骨架；上游在 0.5.7/0.5.8 引入的 `buildAgentContext`、`createTurnCap` 已采用，不要再换回本地旧实现（见文末「已回归上游」）。
 
@@ -158,8 +168,11 @@
 **实现**：
 - 配置 `recallResponseMaxTokens`（默认 12000，环境变量 `PI_BLACKHOLE_RECALL_RESPONSE_MAX_TOKENS`）与上游 `recallResponseMaxChars` 独立；任一为 0 只关闭该项（`src/core/unified-config.ts`、`src/core/config-env.ts`）。
 - `src/core/recall-budget.ts`：`capRecallBlocks` 先丢尾部附加块再丢尾部条目，续读提示计入预算；极小预算按码点二分取前缀，绝不超限；`capRecallText` 用于 drill-down 文本。
-- `src/tools/recall.ts`：所有分支（`#N:path`、`#N`、记忆 id、搜索、错误、空结果）最后统一经过 `capRecallText`；`:full` 也受限。
+- `src/tools/recall.ts`：所有分支（`#N`、记忆 id、搜索、错误、空结果）最后统一经过 `capRecallText`；`:full` 也受限。
+- `#N:path` 采用上游 0.5.9 的 `expandEntryFileDetailed` + `capDrillDownText`（按行边界截断、给出可直接续读的 `offset:limit`），本地给 `capDrillDownText` 增加 `maxTokens`：字符和估算 token 两个上限取更紧的一个；为避免超大文件反复估算，先按「每字符至少 0.25 token」预切片再二分。
 - `src/core/format-recall.ts`：touched 输出传入 token 上限。
+
+- `example-config.json` 列出 `recallResponseMaxTokens`（上游 0.5.9 的完整性测试要求示例列出全部默认键）。
 
 **测试**：`tests/audit-regressions.test.ts`、`tests/integration.test.ts`（真实 recall 执行器各路径有界、Unicode 不越界）。
 
@@ -180,7 +193,7 @@
 
 ## D11 状态栏兼容
 
-`src/om/status-bar.ts`：`ctx.hasUI` 为假时不启用（headless SDK 的 UI shim 读取 theme 可能抛错）；颜色参数用 `ThemeColor` 类型。
+已回归上游（0.5.9，本地 PR #128）：`src/om/status-bar.ts` 与上游一致，保留编号只为兼容旧引用。
 
 ## D12 打包与工程
 
@@ -201,7 +214,7 @@
 | `src/commands/memory.ts` | D2 |
 | `src/core/build-sections.ts` | D6 |
 | `src/core/compaction-chain.ts` | D12 |
-| `src/core/config-env.ts`、`src/core/unified-config.ts` | D8 |
+| `src/core/config-env.ts`、`src/core/unified-config.ts`、`example-config.json` | D8 |
 | `src/core/format-recall.ts`、`src/core/recall-budget.ts`、`src/tools/recall.ts` | D8 |
 | `src/details.ts`、`src/hooks/compaction-context.ts` | D9 |
 | `src/hooks/before-compact.ts` | D9、D12 |
@@ -213,7 +226,6 @@
 | `src/om/agents/reflector/agent.ts` | D4、D5 |
 | `src/om/agents/dropper/agent.ts` | D2、D4、D5 |
 | `src/om/agents/dropper/coverage.ts`、`src/om/ledger/projection.ts`、`src/om/ledger/progress.ts` | D2（progress 另含 D5 的 `boundedContext`） |
-| `src/om/status-bar.ts` | D2、D11 |
 | `src/project-recall/dedup.ts`、`src/project-recall/format-export.ts` | D7 |
 
 不在表内的 `src/` 文件应与上游完全一致；出现差异即为未记录的漂移，先查明来源再合并。
@@ -224,3 +236,9 @@
 - `src/om/agents/agent-context.ts`：替代本地手写 system 消息。
 - `src/om/agents/turn-cap.ts`：替代本地 `src/om/turn-limit.ts`（已删除）。
 - `src/hooks/cosmetic-output.ts` 的 `isObject` 守卫：替代本地 `unknown` 写法。
+
+2026-09-26 同步 a621e01（v0.5.9）时采用：
+- `#N:path` 按行截断与续读坐标（本地 PR #129 的上游最终版）。
+- 状态栏：`src/om/status-bar.ts` 与上游完全一致（无 UI 守卫即本地 PR #128，上游已合并），D11 不再是差异；状态栏 P 值仍经 `observationPoolTokens()` 走 D2。
+- worker 硬超时、`complete` 早停、`cacheRetention`、`showWorkerNotifications`、dropper 压力基准修复、`livePoolObservations`。
+- 三个阶段的进度提示文字恢复为上游原文（数字仍是本地估算）。

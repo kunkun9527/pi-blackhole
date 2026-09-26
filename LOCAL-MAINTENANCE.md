@@ -33,8 +33,8 @@ bash C:/Users/Su/.pi/agent/local-packages/pi-blackhole-local/scripts/bootstrap-w
 
 | 项目 | 值 |
 |---|---|
-| 当前版本 | `0.5.8-dev.a00bf11.local.1` |
-| 上游基线 | dev `a00bf1144391d49661d96c1a26578ad91f2e6523`（记录在 `package.json` 的 `blackholeUpstream.commit`） |
+| 当前版本 | `0.5.9-dev.a621e01.local.1` |
+| 上游基线 | dev `a621e01f0fc65c28cedac643ff9325f6f9fa3673`（v0.5.9）（记录在 `package.json` 的 `blackholeUpstream.commit`） |
 | 上游 | `https://github.com/k0valik/pi-blackhole`，工作区远端名 `origin` |
 | fork（持久） | `https://github.com/kunkun9527/pi-blackhole`，远端名 `fork`；只用 `main` 一个分支，内容是上游 dev + 本地补丁。**不要点 GitHub 页面上的 Sync fork / Discard commits**，那会用上游 main 覆盖或丢弃本地补丁；同步上游只走下面的流程（合并 `origin/dev`） |
 | 原版仓库（R 盘） | `R:/pi-blackhole-upstream`，`dev` 只快进，不放本地改动 |

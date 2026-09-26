@@ -14,13 +14,13 @@ try {
   const entries=Array.from({length:3},(_,i)=>({id:'s'+i,type:'message',message:{role:'user',content:'中文'.repeat(800),timestamp:0}}));
   let cursor:any;const warnings:any[]=[];
   const runtime:any={config:{...DEFAULTS,compaction:'manual',observeAfterTokens:3000,observerChunkMaxTokens:8000},
-    isGenerationActive:()=>true,getCursor:()=>cursor,advanceCursor:(_s:any,entryId:string,state:string)=>{cursor={entryId,state};},
+    isGenerationActive:()=>true,tryEmitWorkerInfo:()=>{},getCursor:()=>cursor,advanceCursor:(_s:any,entryId:string,state:string)=>{cursor={entryId,state};},
     tryEmitInfo:()=>{},findCandidateConfig:()=>undefined,recordRetryableError:(_c:any,e:any)=>{throw e;},recordDeterministicError:()=>{},recordConsolidationStageError:(_c:any,_s:any,e:any)=>warnings.push(e)};
   const pi:any={appendEntry:()=>{throw new Error('manual mode must not append to branch');}};
   const ctx:any={hasUI:false,sessionManager:{getBranch:()=>entries,getSessionId:()=> 'manual-test'}};
   const model:any={id:'offline',provider:'offline',contextWindow:20000,maxTokens:1000};
   const runAgent:any=async(args:any)=>({observations:[{id:hashId('fact '+args.allowedSourceEntryIds[0]),content:'fact '+args.allowedSourceEntryIds[0],timestamp:'2026-09-16',sourceEntryIds:args.allowedSourceEntryIds,relevance:'high',tokenCount:3}]});
-  await runObserverStage(pi,runtime,ctx,{signal:new AbortController().signal} as any,async()=>({ok:true,model,apiKey:'offline'}),runAgent);
+  await runObserverStage(pi,runtime,ctx,{signal:new AbortController().signal} as any,async()=>({ok:true,source:'session' as const,model,apiKey:'offline'}),runAgent);
   assert.deepEqual(warnings,[]);
   const state=readPendingState('manual-test');
   assert.deepEqual(state.observationBatches?.map(b=>b.coversUpToId),['s0','s1','s2']);

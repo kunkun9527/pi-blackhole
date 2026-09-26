@@ -6,7 +6,7 @@
  * and throws if the API errored without collecting any tool results.
  */
 import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { CacheRetention, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { buildAgentContext } from "../agent-context.js";
 import { createTurnCap, type LegacyTurnCapOption } from "../turn-cap.js";
 import {
@@ -61,6 +61,13 @@ interface RunReflectorArgs extends InputBudgetOptions {
    * OpenCode `x-opencode-session`) without per-provider branching upstream.
    */
   sessionId?: string;
+  /**
+   * Provider-neutral prompt-cache retention preference
+   * (`SimpleStreamOptions.cacheRetention`). Unset defers to pi's effective
+   * setting (provider default `short`); adapters ignore values they do not
+   * support.
+   */
+  cacheRetention?: CacheRetention;
 }
 
 const RecordReflectionsSchema = Type.Object({
@@ -72,6 +79,15 @@ const RecordReflectionsSchema = Type.Object({
       }),
     }),
     { minItems: 1 },
+  ),
+  // Optional on purpose: a model that omits the flag must lose only the
+  // early-stop hint, never the batch itself (a required field would fail
+  // host-side validation and drop every reflection in the call).
+  complete: Type.Optional(
+    Type.Boolean({
+      description:
+        "Whether this batch completes reflection review. Set false when more reflections or corrections remain.",
+    }),
   ),
 });
 
@@ -113,11 +129,25 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
   const allowedObservationIds = observations.map((observation) => observation.id);
   const existingReflectionIds = new Set(reflections.map((reflection) => reflection.id));
   const accumulated = new Map<string, Reflection>();
+  // Cumulative counts for this run, including reflections the model corrected
+  // or re-proposed in a later batch. Reported so the model can reconcile what
+  // it already sent — they are counter semantics, not work still owed.
+  let runRejected = 0;
+  let runDuplicates = 0;
+  // Local D4: set when the most recent batch returned `terminate` (complete=true).
+  let lastBatchTerminated = false;
 
   const recordReflections: AgentTool<typeof RecordReflectionsSchema> = {
     name: "record_reflections",
     label: "Record reflections",
-    description: "Record new durable reflections with supporting observation ids.",
+    description:
+      "Record a batch of new durable reflections with supporting observation ids. " +
+      "complete=true ends a fully valid reflection review; set complete=false when more reflections or corrections remain. " +
+      "Incomplete or rejected work stays open. " +
+      // The reflector's batch carries minItems: 1, so unlike the observer it has
+      // no empty close — say so, or a model mirroring the observer's protocol
+      // emits a batch the host rejects and burns turns on it.
+      "May not be empty: when nothing is stable enough, do not call the tool and reply briefly instead.",
     parameters: RecordReflectionsSchema,
     execute: async (_id, params: RecordReflectionsArgs) => {
       let added = 0;
@@ -146,14 +176,52 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
         });
         added++;
       }
+      runRejected += rejected;
+      runDuplicates += duplicates;
+      const terminates = params.complete === true && rejected === 0;
+      lastBatchTerminated = terminates;
+      const rejectionReason =
+        rejected > 0 ? " (invalid content or unknown supporting observation ids)" : "";
+      const refusal =
+        params.complete === true && rejected > 0
+          ? ` complete=true was not honored: ${rejected} reflection${rejected === 1 ? "" : "s"} in this batch still ${rejected === 1 ? "needs" : "need"} correcting — re-submit them with supportingObservationIds copied from the observation lines; anything not re-submitted is discarded and will not be recorded.`
+          : "";
+      // Counter semantics rather than a claim about this receipt, so the
+      // sentence stays true on the batch that creates the count. Mirrors the
+      // observer's three-way reconciliation: proposals = recorded + duplicates
+      // + rejected.
+      const totals =
+        ` Run totals: ${accumulated.size} recorded, ` +
+        `${runDuplicates} duplicate${runDuplicates === 1 ? "" : "s"} skipped, ` +
+        `${runRejected} rejected cumulatively across this run ` +
+        `(a count above zero does not mean corrections are still owed).`;
+      // Suppressed on a refused complete batch: telling the model that
+      // complete=true ends the review one sentence before saying complete=true
+      // was not honored is the contradiction this branch must never emit.
+      const guidance =
+        terminates || refusal
+          ? ""
+          : ` complete=true ends the review; complete=false asks for another batch.`;
       return {
         content: [
           {
             type: "text",
-            text: `Recorded ${added} reflection${added === 1 ? "" : "s"}; ${duplicates} duplicate${duplicates === 1 ? "" : "s"}; ${rejected} rejected. Total this run: ${accumulated.size}.`,
+            text:
+              `Recorded ${added} reflection${added === 1 ? "" : "s"}; ` +
+              `${duplicates} duplicate${duplicates === 1 ? "" : "s"}; ` +
+              `${rejected} rejected in this batch${rejectionReason}.` +
+              totals +
+              guidance +
+              refusal,
           },
         ],
         details: { added, duplicates, rejected, total: accumulated.size },
+        // Per-batch gate, deliberately not run-scoped: an earlier rejection was
+        // reported in its own receipt and stays visible in the cumulative run
+        // totals, and a corrected later batch must still be able to close the
+        // run — run-wide gating would disable early-stop for the whole run
+        // after any single rejected entry, including runs that fixed it.
+        terminate: terminates,
       };
     },
   };
@@ -162,7 +230,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
   const contextCap = Math.floor(limit * 0.1);
   const priorReflections = boundedContext([...(args.existingReflectionsSummary?.split('\n') ?? []), ...reflections.map(reflectionToSummaryLine)], contextCap);
   const priorObservations = boundedContext(args.existingObservationsSummary?.split('\n') ?? [], contextCap);
-  const render = (items: Observation[]) => `EXISTING REFLECTIONS (context only):\n${priorReflections}\n\nEXISTING OBSERVATIONS (context only):\n${priorObservations}\n\nNEW OBSERVATIONS TO PROCESS:\n${joinOrEmpty(items.map(observationToSummaryLine))}\n\nCrystallize missing durable facts into reflections. If nothing is stable enough, do not call the tool.`;
+  const render = (items: Observation[]) => `EXISTING REFLECTIONS (context only):\n${priorReflections}\n\nEXISTING OBSERVATIONS (context only):\n${priorObservations}\n\nNEW OBSERVATIONS TO PROCESS:\n${joinOrEmpty(items.map(observationToSummaryLine))}\n\nCrystallize any missing durable facts or patterns into new reflections. Use complete=false for a partial batch or a correction, and use complete=true only on the final valid batch once every active observation has been reviewed. If nothing is stable enough, do not call the tool.`;
   const batches = planInputBatches(observations, items => agentInputTokens(REFLECTOR_SYSTEM, [recordReflections], userPrompt(render(items))) <= initialInputLimit(limit), 'Reflector');
   if (batches.length > 1) {
     const results = new Map<string, Reflection>();
@@ -194,6 +262,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
     headers,
     env,
     ...(args.sessionId ? { sessionId: args.sessionId } : {}),
+    ...(args.cacheRetention ? { cacheRetention: args.cacheRetention } : {}),
     ...(providerFetch ? { fetch: providerFetch } : {}),
     maxTokens: boundedMaxTokens(model, AGENT_LOOP_MAX_TOKENS),
     convertToLlm: (msgs) => msgs as Message[],
@@ -215,7 +284,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
         stopReason?: string;
         errorMessage?: string;
       }>;
-      agentError = agentCompletionError(msgs, signal);
+      agentError = agentCompletionError(msgs, signal, lastBatchTerminated);
     }
   }
   await stream.result();

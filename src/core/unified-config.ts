@@ -7,9 +7,17 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { applyEnvOverrides, DECLARATIVE_ENV_OVERRIDES } from "./config-env.js";
+import {
+  applyEnvOverrides,
+  CACHE_RETENTION_VALUES,
+  DECLARATIVE_ENV_OVERRIDES,
+  MAX_TIMER_DELAY_MS,
+  normalizeCacheRetention,
+} from "./config-env.js";
+
+export { CACHE_RETENTION_VALUES, normalizeCacheRetention };
 import { getAgentDir as originalGetAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { CacheRetention, ModelThinkingLevel } from "@earendil-works/pi-ai";
 
 // ── getAgentDir with PI_CODING_AGENT_DIR override ───────────────────────────
 
@@ -208,9 +216,8 @@ export interface UnifiedConfig {
   reflectorInputMaxTokens: number;
   /** Max prompt tokens for dropper model input (rolling window cap). */
   dropperInputMaxTokens: number;
-  /** Pressure threshold for dropper.  When active observation pool tokens exceed
-   *  this fraction of reflectorInputMaxTokens, the dropper runs even without new
-   *  observations/reflections (to keep the pool pruned).
+  /** Fraction of observationsPoolMaxTokens that triggers pressure-driven
+   *  dropping without new data. A value of 1 disables pressure.
    *  Default 0.70 (70%). Must be in range (0, 1]. */
   dropperPressureThreshold: number;
   /** Minimum observation-pool fullness (fraction of observationsPoolMaxTokens)
@@ -229,6 +236,14 @@ export interface UnifiedConfig {
   /** Body-idle timeout for background provider streams. Uses pi's default when unset;
    *  set to 0 to explicitly disable the wrapper. */
   providerIdleTimeoutMs?: number;
+  /** Hard elapsed deadline for each worker/model attempt, including headers,
+   *  streaming, tool turns, and final confirmation. Unset or 0 disables it. */
+  workerAttemptTimeoutMs?: number;
+  /** Provider-neutral prompt-cache retention preference for the memory
+   *  workers. Unset defers to pi's effective setting (provider default
+   *  `short`); adapters ignore values they do not support, so `long` is
+   *  opt-in rather than our default. */
+  cacheRetention?: CacheRetention;
 
   /** Base model override for all memory workers. */
   model?: OmModelConfig;
@@ -260,6 +275,10 @@ export interface UnifiedConfig {
   debugLog: boolean;
   /** Show the blackhole footer status bar (token gauges + worker events). */
   statusBar: boolean;
+  /** Show routine observer/reflector/dropper progress toasts. Warnings,
+   *  errors, model fallback/unavailability and compaction notices are
+   *  unaffected. */
+  showWorkerNotifications: boolean;
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────────────
@@ -309,10 +328,17 @@ export const DEFAULTS: UnifiedConfig = {
   observerChunkMaxTokens: 40_000,
   observerPreambleMaxTokens: 0,
   agentMaxTurns: 16,
+  // Optional knobs must still be DEFAULTS members (as undefined) or
+  // ConfigManager.save() — which diffs against Object.keys(DEFAULTS) —
+  // silently drops them when saving from the settings modal.
+  providerIdleTimeoutMs: undefined,
+  workerAttemptTimeoutMs: undefined,
+  cacheRetention: undefined,
 
   memory: true,
   debugLog: false,
   statusBar: true,
+  showWorkerNotifications: true,
 };
 
 /**
@@ -513,6 +539,17 @@ export function normalizeThresholdKnobs(rec: Record<string, unknown>): void {
   if (!(typeof idle === "number" && Number.isInteger(idle) && idle >= 0)) {
     delete rec.providerIdleTimeoutMs;
   }
+  const workerAttempt = rec.workerAttemptTimeoutMs;
+  if (
+    !(
+      typeof workerAttempt === "number" &&
+      Number.isInteger(workerAttempt) &&
+      workerAttempt >= 0 &&
+      workerAttempt <= MAX_TIMER_DELAY_MS
+    )
+  ) {
+    delete rec.workerAttemptTimeoutMs;
+  }
 }
 
 function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
@@ -525,13 +562,19 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
     c.compactionSummaryMode = raw.compactionSummaryMode;
   if (isTailBehavior(raw.tailBehavior)) c.tailBehavior = raw.tailBehavior;
   if (isMidRunCompaction(raw.midRunCompaction)) c.midRunCompaction = raw.midRunCompaction;
+  // cacheRetention is the one string enum that canonicalizes: the raw value is
+  // normalized so a hand-edited "LONG" resolves the same as the env var's.
+  const cacheRetention = normalizeCacheRetention(raw.cacheRetention);
+  if (cacheRetention) c.cacheRetention = cacheRetention;
 
   // Threshold knobs (compactAfterTokens / Ratio / Reserve / Preset /
-  // Presets / providerIdleTimeoutMs) — copied bluntly, then scrubbed by the
+  // Presets / providerIdleTimeoutMs / workerAttemptTimeoutMs) — copied bluntly, then scrubbed by the
   // shared normalizeThresholdKnobs: 0/absent behaves as unset, out-of-range
   // values are dropped, legacy 81000 residue is dropped, and preset
   // definitions are validated + sorted. Same scrubber the modal validate
-  // uses, so both loaders agree on every key.
+  // uses, so both loaders agree on every key. Runs after the numKeys pass
+  // below so its bounds (e.g. MAX_TIMER_DELAY_MS) are the final word for
+  // keys validated in both places.
   const THRESHOLD_BLUNT_KEYS = [
     "compactAfterTokens",
     "compactAfterRatio",
@@ -539,6 +582,7 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
     "compactAfterPreset",
     "compactAfterPresets",
     "providerIdleTimeoutMs",
+    "workerAttemptTimeoutMs",
   ] as const;
 
   // Provider-aware skip list (entries: provider or "provider:api")
@@ -563,6 +607,8 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
   if (typeof raw.fullFoldAlways === "boolean") c.fullFoldAlways = raw.fullFoldAlways;
   if (typeof raw.debugLog === "boolean") c.debugLog = raw.debugLog;
   if (typeof raw.statusBar === "boolean") c.statusBar = raw.statusBar;
+  if (typeof raw.showWorkerNotifications === "boolean")
+    c.showWorkerNotifications = raw.showWorkerNotifications;
 
   // Numeric fields — use nonNegativeInt for keys where 0 is meaningful
   // (observerPreambleMaxTokens 0 = auto, retainedToolOutputMaxTokens 0 = disabled)
@@ -604,9 +650,8 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
   for (const k of THRESHOLD_BLUNT_KEYS) {
     if (raw[k] !== undefined) (c as Record<string, unknown>)[k] = raw[k];
   }
-  normalizeThresholdKnobs(c as unknown as Record<string, unknown>);
   for (const k of numKeys) {
-    // observerPreambleMaxTokens and providerIdleTimeoutMs accept 0 (disabled/inherit);
+    // observerPreambleMaxTokens and timeout fields accept 0 (disabled/inherit);
     // everything else must be > 0.
     const validator =
       k === "observerPreambleMaxTokens" ||
@@ -620,6 +665,10 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
     const v = validator(raw[k]);
     if (v !== undefined) (c as Record<string, unknown>)[k] = v;
   }
+  // SAFETY: c is a plain config record; the normalizer only validates or deletes named properties.
+  // Runs after the numKeys pass so its bounds (e.g. MAX_TIMER_DELAY_MS) are
+  // the final word for keys validated in both places.
+  normalizeThresholdKnobs(c as unknown as Record<string, unknown>);
 
   // Models
   const model = parseModel(raw.model);

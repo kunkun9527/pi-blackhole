@@ -1,41 +1,43 @@
 # 开发版同步验收记录
 
+上一次（a00bf11 / 0.5.8）的记录见 git 历史：`git log -p -- UPSTREAM-MERGE-REPORT.md`。
+
 ## 来源与结果
 
-- dev commit：`a00bf1144391d49661d96c1a26578ad91f2e6523`（上一基线 `b4e0591`，含 v0.5.7、v0.5.8 及其后 git-status 修复）。
-- 合并方式：整合树分支 `main`（fork 的 main；曾名 local/zh、local/b4e0591-zh），先提交本地补丁（`2d9c86b`），再 `git merge origin/dev`。
-- 本地验收：strict 类型检查通过；`bun test ./tests/` 71 项回归全部通过；pi 0.87.1 真实加载器冒烟和 inline 宿主探针通过。
-- 完整上游 suite（vitest 5.0.1）：2223 通过，6 失败，共 2229。**未宣称全绿**；6 项失败均来自本地 token 策略，见下。
+- dev commit：`a621e01f0fc65c28cedac643ff9325f6f9fa3673`（v0.5.9；上一基线 `a00bf11`）。
+- 合并方式：fork `main`（上一提交 `28cd883`）执行 `git merge origin/dev`，10 个文件内容冲突，另有测试目录改名 / 删除冲突，逐个手工合并。
+- 本地验收：`tsc --noEmit` 通过；`bun test ./tests/` 71 项全部通过。
+- 上游全量 suite（vitest 5.0.1）：2328 通过，21 失败，共 2349。**没有全部通过**；21 项失败都是本地策略造成的，已登记在 `docs/LOCAL-DIVERGENCE.md`（D2 20 项，D5 1 项），下文也有汇总。
 
 ## 上游变更与处理
 
 | 上游变更 | 处理 |
 | --- | --- |
-| `agent-context.ts`：用宿主 `createInitialSystemMessage` + `toToolDeclaration` 构造 system 载体，兼容 ≤0.86 | 采用，替代本地手写 system 消息 |
-| `turn-cap.ts`：同时输出 `shouldStopAfterTurn` / `finishTurn` | 采用，删除本地 `turn-limit.ts`，本地测试改用 `createTurnCap` |
-| provider stream 处理函数绑定 config 作为 `this` | 采用 |
-| `compact-failed`：`pi.on.bind(pi)` | 采用 |
-| git 子进程清理 `GIT_DIR` 等仓库定位环境变量 | 采用 |
-| `cosmetic-output`：`isObject` 守卫 | 采用，替代本地 `unknown` 写法 |
-| `observationPoolTokens()` 统一观察池度量；memory 命令在 manual 模式计入 pending | 采用结构，但改为按 content 重算 token（本地策略） |
-| `package.json` 入口改为 `dist/index.js`、pnpm 11.27.1、dependabot、CONTRIBUTING | 不采用入口与工具链；文档随合并保留在整合树 |
+| dropper 压力基准由 `0.7 × reflectorInputMaxTokens` 改为 `observationsPoolMaxTokens` | 采用。本地配置（池上限 20000、reflector 输入 100000）下，之前的压力清理实际从未触发 |
+| 压力运行以整个活动池为候选（`livePoolObservations`，ID 去重、pending drop 墓碑） | 采用；token 求和仍按 content 重算（D2），超大池由本地 `planInputBatches` 分批（D5） |
+| worker 单次调用硬超时 `workerAttemptTimeoutMs`（`runWorkerAttempt`） | 采用，三个阶段都接入；默认关闭 |
+| `record_observations` / `record_reflections` 的 `complete` 早停 | 采用。本地 `agentCompletionError` 增加 `completedByTool` 参数，只放行这种正常结束的 `toolUse`（D4），否则每次早停都会被当成失败，observer 整批失败 |
+| `cacheRetention`（prompt cache 保留时长） | 采用，三个阶段透传；默认不设置 |
+| `showWorkerNotifications`（可关闭常规进度提示） | 采用；三个阶段的提示文字恢复为上游原文 |
+| recall `#N:path`：`expandEntryFileDetailed` + `capDrillDownText`（按行截断、给出续读坐标） | 采用，并给 `capDrillDownText` 加本地 token 上限（D8） |
+| 状态栏无 UI 守卫（本地 PR #128） | 采用，`status-bar.ts` 与上游一致，D11 回归上游 |
+| 删除未使用的 configure / status overlay 及其测试 | 采用 |
+| `providerIdleTimeout` 持久化、泄漏 `GIT_DIR` 防护、`example-config.json` 完整性测试 | 采用；示例配置补上本地 `recallResponseMaxTokens` |
+| observer 在部分结果后报错仍推进覆盖；从新到旧截断积压 | 上游仍未修；本地已有 D3 / D4，保留 |
 
 ## 剩余上游断言差异（本地策略）
 
-`upstream-tests/pool-consistency.test.ts` 6 项：测试 fixture 的 `tokenCount`（700 等）与 content 长度不一致，上游直接求和 `tokenCount`；本地不信任已存 `tokenCount`，按 content 保守重算，因此绝对值不同。触发器、状态栏与 memory 命令仍共用同一个 helper，一致性不受影响。
-
-- observationPoolTokens sums and counts the active observations
-- observationPoolTokens excludes tombstoned observations from the sum and count
-- observationPoolTokens adds every pending observation batch when pending is supplied
-- observationPoolTokens matches the inline fold sum on a pre-compaction branch (no snapshot)
-- trigger / display pool agreement auto mode
-- trigger / display pool agreement manual mode
+- **D2（20 项）**：fixture 里 `tokenCount` 写得很大，content 却很短，本地按 content 算出的池很小，达不到压力阈值。
+  - `pool-consistency.test.ts` 12 项。
+  - `consolidation.test.ts`「dropper pressure valve」6 项，「showWorkerNotifications」dropper 2 项。把 `progress.ts` 和 `dropper/agent.ts` 临时改回 `tokenCount` 后这 8 项全部通过，说明失败只来自 token 计量，压力逻辑本身和上游一致。
+- **D5（1 项）**：`consolidation.test.ts`「skips an undersized primary model for an uncapped pressure prompt and uses fallback」。本地没有 consolidation 层的窗口预检，改为在 agent 内分批。
 
 ## 已完成的测试适配
 
-仅整合副本调整：上游新测试从 `tests/` 移到 `upstream-tests/`；`fixtures/pi-extension-api.ts` 保留本地 turn_end 取消订阅实现；`observer.test.ts` 修正合并残留变量。
+- 本地 `tests/om-input-budget.test.ts`、`scripts/smoke-om-manual.ts`：模拟的 `resolveModel` 补上 `source: "session"`，模拟的 runtime 补上 `tryEmitWorkerInfo`，以对齐 0.5.9 的类型。
+- `upstream-tests/consolidation.test.ts`「worker attempt hard timeout」：先预热 observer 模块，再开启假计时器（原因见 D5「测试适配」）。
 
 ## 文件与风险边界
 
-- 全量 JSON 与日志曾在 `R:/Temp/blackhole-sync-a00bf11.*`（内存盘，重启后已不存在）；结论以本文件为准。
-- 未调用远程模型，未压缩真实会话，未重建历史记忆。需要完全重启 pi 验证交互运行。
+- 全量 JSON 曾放在 `R:/Temp/blackhole-upstream-059.json`（内存盘，重启后会丢失）；结论以本文件为准。
+- 没有调用远程模型，也没有压缩真实会话。交互运行要完全重启 pi 后再验证。

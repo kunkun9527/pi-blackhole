@@ -5,7 +5,7 @@
 `/blackhole` replaces Pi's LLM-based `/compact` with an algorithmic structural summary — fast, zero-cost. Three background workers (Observer, Reflector, Dropper) capture durable facts and decisions that survive across compactions. Per-worker model fallback chains with persisted cooldowns. Manual flush mode. One JSON file to configure it all.
 
 > [!NOTE]
-> **Community Fork Notice**: This repository is a community-maintained fork of [`k0valik/pi-blackhole`](https://github.com/k0valik/pi-blackhole) by [@k0valik](https://github.com/k0valik), tracking upstream `dev` (baseline v0.5.8+). All core architectural design and implementation belong to the original author. This fork introduces targeted enhancements for **CJK (Chinese/Japanese/Korean) multilingual precision**, **FIFO long-session memory durability**, and **defensive context safety**.  
+> **Community Fork Notice**: This repository is a community-maintained fork of [`k0valik/pi-blackhole`](https://github.com/k0valik/pi-blackhole) by [@k0valik](https://github.com/k0valik), tracking upstream `dev` (baseline v0.5.9). All core architectural design and implementation belong to the original author. This fork introduces targeted enhancements for **CJK (Chinese/Japanese/Korean) multilingual precision**, **FIFO long-session memory durability**, and **defensive context safety**.  
 > **关于本 Fork**：本仓库基于原版 [`k0valik/pi-blackhole`](https://github.com/k0valik/pi-blackhole) 维护，核心架构归原作者所有。在保持与上游完全兼容的前提下，重点增强了 **CJK 多语言精度**、**长会话 FIFO 记忆完整性** 与 **上下文防御性预算安全**。
 
 ---
@@ -36,7 +36,7 @@ Then `/reload` or restart Pi. The config file at `~/.pi/agent/pi-blackhole/pi-bl
 
 ## Fork Enhancements at a Glance / 特性概览
 
-This edition tracks upstream `dev` (baseline v0.5.8+) while hardening key areas for long engineering runs and non-English environments:
+This edition tracks upstream `dev` (baseline v0.5.9) while hardening key areas for long engineering runs and non-English environments:
 
 | Capability / 核心能力 | Upstream Baseline / 上游原版 | This Fork (CJK & Long-Session Edition) / 本 Fork 增强 |
 |---|---|---|
@@ -70,7 +70,7 @@ This edition tracks upstream `dev` (baseline v0.5.8+) while hardening key areas 
   *(仅对完全相同的原文进行去重，杜绝相似代码片段或语义接近的记录被算法误合并、误删)*
 
 > **Detailed Specifications / 详细技术规范**:  
-> See [**`docs/LOCAL-DIVERGENCE.md`**](docs/LOCAL-DIVERGENCE.md) for the complete list of 12 divergence items and merge rules, and [**`LOCAL-MAINTENANCE.md`**](LOCAL-MAINTENANCE.md) for the sync and maintenance workflow.  
+> See [**`docs/LOCAL-DIVERGENCE.md`**](docs/LOCAL-DIVERGENCE.md) for the complete divergence list (D1–D12; D11 merged upstream in v0.5.9) and merge rules, and [**`LOCAL-MAINTENANCE.md`**](LOCAL-MAINTENANCE.md) for the sync and maintenance workflow.  
 > 完整技术实现与维护规则请参阅 [**`docs/LOCAL-DIVERGENCE.md`**](docs/LOCAL-DIVERGENCE.md) 与 [**`LOCAL-MAINTENANCE.md`**](LOCAL-MAINTENANCE.md)。
 
 </details>
@@ -126,7 +126,7 @@ The agent gets one unified `recall` tool that handles every form of historical l
 
 When the agent expands a session entry (`#N`), related observations and reflections from the session ledger are automatically shown alongside the expanded content — so the agent gets the raw transcript _and_ the durable fact layer in one call.
 
-Every recall response is capped at `recallResponseMaxChars` (default 48,000 ≈ 12k tokens). Search snippet lines, expanded entries, and related observation bodies are clipped to keep a single huge stored message from flooding the context; a truncation marker names the omitted entries and how to continue (`#N:text` / `#N:path` / `page:N`).
+Every recall response is capped at `recallResponseMaxChars` (default 48,000 ≈ 12k tokens). Search snippet lines, expanded entries, drill-down bodies, and related observation bodies are clipped to keep a single huge stored message from flooding the context; a truncation marker names the omitted entries and how to continue (`#N:text` / `#N:path` / `page:N`). A capped drill-down cuts only at line boundaries and names the first line it did not show, so the next `#N:path:offset:limit` call continues there without skipping or repeating lines.
 
 The `/blackhole-recall` command exposes the same engine to the user. Results are shown as a collapsible message and auto-fed to the agent as context.
 
