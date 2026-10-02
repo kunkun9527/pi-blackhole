@@ -36,7 +36,7 @@ test('reflection batch aggregation preserves all supporting source observations'
     await ctx.tools[0].execute('r',{reflections:[{content:'同一完整事实',supportingObservationIds:idsOf(prompts)}]});
     return [{stopReason:'stop'}];
   });
-  const result=await runReflector({model,apiKey:'offline',inputMaxTokens:7000,observations,reflections:[],agentLoop:loop,streamFn:noNetwork});
+  const result=(await runReflector({model,apiKey:'offline',inputMaxTokens:7000,observations,reflections:[],agentLoop:loop,streamFn:noNetwork})).reflections;
   assert.ok(calls>1);assert.equal(result?.length,1);
   assert.deepEqual(new Set(result![0].supportingObservationIds),new Set(observations.map(o=>o.id)));
 });

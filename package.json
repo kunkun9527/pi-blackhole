@@ -1,8 +1,8 @@
 {
   "name": "pi-blackhole-local",
-  "version": "0.5.9-dev.a621e01.local.2",
+  "version": "0.5.10-dev.be64de8.local.1",
   "private": true,
-  "description": "Pi Blackhole dev a621e01 (0.5.9) with Chinese safety, bounded recall, lossless batching and Pi 0.87 compatibility",
+  "description": "Pi Blackhole v0.5.10 (be64de8) with Chinese safety, bounded recall, lossless batching and Pi 0.87 compatibility",
   "license": "MIT",
   "type": "module",
   "main": "./index.ts",
@@ -27,7 +27,7 @@
   "blackholeUpstream": {
     "repository": "https://github.com/k0valik/pi-blackhole.git",
     "branch": "dev",
-    "commit": "a621e01f0fc65c28cedac643ff9325f6f9fa3673",
+    "commit": "be64de823f27d8be4195dbe0734409017b05240f",
     "localPatchBase": "v0.5.5"
   }
 }

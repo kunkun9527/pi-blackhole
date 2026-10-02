@@ -25,7 +25,7 @@ try {
   assert.ok(observed.observations.every(o => o.sourceEntryIds.includes('live-source-1')), 'Source attribution lost');
   assert.ok(observed.observations.some(o => o.content.includes('15432')), 'Exact numeric fact lost');
   console.log(JSON.stringify({ stage: 'observer', records: observed.observations.length, requests }));
-  const reflections = await runReflector({ ...common, observations: observed.observations, reflections: [] });
+  const reflections = (await runReflector({ ...common, observations: observed.observations, reflections: [] })).reflections;
   assert.ok(reflections?.length, 'Reflector produced no memory');
   console.log(JSON.stringify({ stage: 'reflector', records: reflections.length, requests }));
   const requestsBeforeDropper = requests;

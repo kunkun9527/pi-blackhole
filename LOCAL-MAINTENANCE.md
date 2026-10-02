@@ -33,8 +33,8 @@ bash C:/Users/Su/.pi/agent/local-packages/pi-blackhole-local/scripts/bootstrap-w
 
 | 项目 | 值 |
 |---|---|
-| 当前版本 | `0.5.9-dev.a621e01.local.2` |
-| 上游基线 | dev `a621e01f0fc65c28cedac643ff9325f6f9fa3673`（v0.5.9）（记录在 `package.json` 的 `blackholeUpstream.commit`） |
+| 当前版本 | `0.5.10-dev.be64de8.local.1` |
+| 上游基线 | tag `v0.5.10`（`be64de823f27d8be4195dbe0734409017b05240f`）（记录在 `package.json` 的 `blackholeUpstream.commit`） |
 | 上游 | `https://github.com/k0valik/pi-blackhole`，工作区远端名 `origin` |
 | fork（持久） | `https://github.com/kunkun9527/pi-blackhole`，远端名 `fork`；只用 `main` 一个分支，内容是上游 dev + 本地补丁。**不要点 GitHub 页面上的 Sync fork / Discard commits**，那会用上游 main 覆盖或丢弃本地补丁；同步上游只走下面的流程（合并 `origin/dev`） |
 | 原版仓库（R 盘） | `R:/pi-blackhole-upstream`，`dev` 只快进，不放本地改动 |
@@ -53,7 +53,7 @@ fork 是公开仓库：文档里含本机路径（`C:/Users/Su/...`），不要�
 
 1. **更新原版仓库**：重建脚本已完成 fetch 与快进；单独执行时用 `cd R:/pi-blackhole-upstream && git fetch --all --tags --prune && git switch dev && git merge --ff-only origin/dev`（`git log -1 dev` 为上游最新提交）。
 2. **查看上游改了什么**：`git log --oneline <旧基线>..origin/dev` 与 `git diff --stat <旧基线> origin/dev -- src index.ts`，对照 `docs/LOCAL-DIVERGENCE.md` 的「文件 → 差异索引」标出会碰到本地差异的文件（每个被改动的 `src` 文件都已归类为「无本地差异」或具体 D 编号）。
-3. **合并**：`cd R:/pi-blackhole-integration && git fetch origin && git merge --no-ff --no-commit origin/dev`（出现冲突列表）。
+3. **合并**：只合并上游已发版的 tag，不合并 dev 上未发版的提交：`cd R:/pi-blackhole-integration && git fetch origin --tags && git merge --no-ff --no-commit <tag>`（出现冲突列表）。第 2 步的 `origin/dev` 相应换成 `<tag>`。
 4. **解决冲突**（无剩余冲突标记，`git diff --check` 干净）：
    - `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml` 取本地版本，再手工吸收上游有意义的依赖变化。
    - 源码冲突按 `docs/LOCAL-DIVERGENCE.md` 对应条目的「不变量」和「合并注意」处理：保留本地不变量，吸收上游与之正交的改动。上游修好了本地补丁针对的问题时，可以改用上游实现，并把该条目移到「已回归上游」。

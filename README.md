@@ -2,10 +2,22 @@
 
 **Deterministic compaction + session-aware observational memory for [Pi](https://github.com/earendil-works/pi) — in one unified extension.**
 
-`/blackhole` replaces Pi's LLM-based `/compact` with an algorithmic structural summary — fast, zero-cost. Three background workers (Observer, Reflector, Dropper) capture durable facts and decisions that survive across compactions. Per-worker model fallback chains with persisted cooldowns. Manual flush mode. One JSON file to configure it all.
+`/blackhole` replaces Pi's LLM-based `/compact` with an algorithmic structural summary — fast, and the compaction step itself is zero-cost. Three background workers (Observer, Reflector, Dropper) run as separate billed model calls to capture durable facts and decisions that survive across compactions. Per-worker model fallback chains with persisted cooldowns. Manual flush mode. One JSON file to configure it all.
+
+> **A note from the maintainer: this is experimental.**
+>
+> It won't save you tokens by itself. Compacting is free — no model call, just structure. Remembering is not: the background workers wake up as your session grows, read what happened, and write down what seems worth keeping. Those are real billed calls. Untuned, on your main coding model, this costs more than doing nothing. It only earns its keep with the workers on something cheap or free.
+>
+> It also doesn't solve compaction — nobody has, as far as I know. It takes a different approach ([observational memory](https://mastra.ai/blog/observational-memory), via [pi-observational-memory](https://github.com/elpapi42/pi-observational-memory)) and merges it with [pi-vcc](https://github.com/sting8k/pi-vcc), because the two conflicted when installed together. I merged them and vibeslopped a lot on top: robustness work, new behavior, and bugfixes ported from both upstreams. The recap is pattern-matching, not understanding: it guesses at goals and preferences from their shape. The memory is model-written, so it has the opposite weakness: it can keep what sounds right but isn't. Assume both need the search tool as a backstop.
+>
+> Want only one half? Use the project that does just that half. No hard feelings.
+>
+> Scope stays tight on purpose: forks welcome, bug fixes welcome and reviewed, new features only if they serve conversation compaction itself — not the week's AI fad bolted on. Almost everything is a toggle, which I'll admit is tiring; I use a small slice myself. Memory on most days, off some days. Workers on free models, waking rarely, size-based auto-compaction as a backstop. Most days I don't compact at all — fresh sessions beat resumed ones.
+>
+> Best fit is someone who doesn't count every token: code locally and push the workers to free hosted models, or code on a top model and run the workers on a local card — knowing each worker's different instructions wipe the local prompt cache for the next one. No measurements, no comparisons against other methods. Fast and nearly free the way I run it, good enough for what I need.
 
 > [!NOTE]
-> **Community Fork Notice**: This repository is a community-maintained fork of [`k0valik/pi-blackhole`](https://github.com/k0valik/pi-blackhole) by [@k0valik](https://github.com/k0valik), tracking upstream `dev` (baseline v0.5.9). All core architectural design and implementation belong to the original author. This fork introduces targeted enhancements for **CJK (Chinese/Japanese/Korean) multilingual precision**, **FIFO long-session memory durability**, and **defensive context safety**.  
+> **Community Fork Notice**: This repository is a community-maintained fork of [`k0valik/pi-blackhole`](https://github.com/k0valik/pi-blackhole) by [@k0valik](https://github.com/k0valik), tracking upstream `dev` (baseline v0.5.10). All core architectural design and implementation belong to the original author. This fork introduces targeted enhancements for **CJK (Chinese/Japanese/Korean) multilingual precision**, **FIFO long-session memory durability**, and **defensive context safety**.  
 > **关于本 Fork**：本仓库基于原版 [`k0valik/pi-blackhole`](https://github.com/k0valik/pi-blackhole) 维护，核心架构归原作者所有。在保持与上游完全兼容的前提下，重点增强了 **CJK 多语言精度**、**长会话 FIFO 记忆完整性** 与 **上下文防御性预算安全**。
 
 ---
@@ -36,7 +48,7 @@ Then `/reload` or restart Pi. The config file at `~/.pi/agent/pi-blackhole/pi-bl
 
 ## Fork Enhancements at a Glance / 特性概览
 
-This edition tracks upstream `dev` (baseline v0.5.9) while hardening key areas for long engineering runs and non-English environments:
+This edition tracks upstream `dev` (baseline v0.5.10) while hardening key areas for long engineering runs and non-English environments:
 
 | Capability / 核心能力 | Upstream Baseline / 上游原版 | This Fork (CJK & Long-Session Edition) / 本 Fork 增强 |
 |---|---|---|

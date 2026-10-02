@@ -3,8 +3,11 @@
  *
  * Upstream: https://github.com/elpapi42/pi-observational-memory (src/agents/observer/agent.ts)
  * Modified by pi-vcc-om: detects agent_end stopReason="error" in the stream
- * and throws if the API errored without collecting any tool results.
- * This allows the consolidation pipeline to fall back to alternative models.
+ * and throws unless the run already closed the chunk with a valid
+ * complete=true batch that recorded observations, so the consolidation
+ * pipeline can fall back to another model instead of advancing coversUpToId
+ * over a half-observed chunk. The same guard covers a run the agent turn cap
+ * cut off mid-chunk.
  */
 import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { CacheRetention, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
@@ -27,6 +30,11 @@ import { estimateStringTokens } from "../../tokens.js";
 import { agentCompletionError, initialInputLimit } from '../../input-budget.js';
 import { agentContextLimit, agentInputLimit, agentInputTokens, boundedContext, budgetedStream, InputBudgetError, userPrompt, type InputBudgetOptions } from '../../input-budget.js';
 import { serializeSourceAddressedBranchEntries, type RenderableEntry } from '../../serialize.js';
+import {
+  withDiscardedCount,
+  WorkerStreamError,
+  workerStreamErrorMessage,
+} from "../../retryable-error.js";
 
 interface RunObserverArgs extends InputBudgetOptions {
   model: Model<any>;
@@ -203,6 +211,11 @@ export type ObserverEmptyReason =
 export interface ObserverResult {
   observations: Observation[] | undefined;
   emptyReason?: ObserverEmptyReason;
+  /**
+   * Provider error from a turn after a valid complete=true close. The run kept
+   * its result (the chunk was declared covered); the caller should log this.
+   */
+  errorAfterClose?: string;
 }
 
 export async function runObserver(args: RunObserverArgs): Promise<ObserverResult> {
@@ -233,6 +246,14 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
   // Local D4: whether the most recent batch returned `terminate`, i.e. the run
   // ended through the sanctioned complete=true early stop.
   let lastBatchTerminated = false;
+  // Whether the run has closed the chunk with a fully valid complete=true batch,
+  // i.e. the model declared the chunk covered and the tool honored it. A later
+  // batch that changes nothing (empty or all duplicates; a host that ignores
+  // `terminate` asks for more turns) does not revoke the close. A later batch
+  // that is not itself a clean close and records or rejects anything does: new
+  // observations under complete=false mean the model found the chunk not yet
+  // covered, and rejections mean the tool just told it corrections remain.
+  let closedByCompleteBatch = false;
 
   const recordObservations: AgentTool<typeof RecordObservationsSchema> = {
     name: "record_observations",
@@ -277,6 +298,8 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
           : "";
       const terminates = params.complete === true && rejected === 0;
       lastBatchTerminated = terminates;
+      if (terminates) closedByCompleteBatch = true;
+      else if (added > 0 || rejected > 0) closedByCompleteBatch = false;
       const refusal =
         params.complete === true && rejected > 0
           ? ` complete=true was not honored: ${rejected} observation${rejected === 1 ? "" : "s"} in this batch still ${rejected === 1 ? "needs" : "need"} correcting — re-submit them with sourceEntryIds copied from the chunk; anything not re-submitted is discarded and will not be recorded.`
@@ -334,6 +357,9 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
+  // Kept in scope past the config so the run can tell "the model stopped" from
+  // "the cap cut the model off".
+  const turnCap = effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : undefined;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
   const config: AgentLoopConfig & ProviderFetchOption & LegacyTurnCapOption = {
     model,
@@ -347,7 +373,9 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
     convertToLlm: (msgs) => msgs as Message[],
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    ...(effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : {}),
+    ...(turnCap
+      ? { shouldStopAfterTurn: turnCap.shouldStopAfterTurn, finishTurn: turnCap.finishTurn }
+      : {}),
   };
 
   const loop = args.agentLoop ?? agentLoop;
@@ -360,22 +388,60 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
   const streamFn = budgetedStream(args.streamFn ?? bridgeStreamFn, agentContextLimit(model, args));
   const stream = loop(prompts, context, config, signal, streamFn);
   let agentError: string | undefined;
-  for await (const event of stream) {
-    // Drain events; the tool's execute already collects records.
-    if (event.type === "agent_end") {
-      const msgs = ((event as any).messages || []) as Array<{
-        stopReason?: string;
-        errorMessage?: string;
-      }>;
-      agentError = agentCompletionError(msgs, signal, lastBatchTerminated);
+  // Local D4: a real provider error outranks the turn cap, as upstream orders it.
+  let providerFailed = false;
+  try {
+    for await (const event of stream) {
+      // Drain events; the tool's execute already collects records.
+      if (event.type === "agent_end") {
+        const msgs = ((event as any).messages || []) as Array<{
+          stopReason?: string;
+          errorMessage?: string;
+        }>;
+        // Local D4: error, aborted, length and an unfinished toolUse all count as
+        // incomplete; only the sanctioned complete=true early stop is exempt.
+        agentError = agentCompletionError(msgs, signal, lastBatchTerminated);
+        providerFailed = msgs[msgs.length - 1]?.stopReason === "error";
+      }
     }
+    await stream.result();
+  } catch (error) {
+    // A stream that breaks outright never emits agent_end, so the guard below
+    // never sees it — yet the run still holds everything recorded so far.
+    throw withDiscardedCount(error, accumulated.size);
   }
-  await stream.result();
-  if (streamFn.error) throw streamFn.error;
-  if (signal?.aborted) throw new Error('Observer aborted; coverage not advanced');
+  if (streamFn.error) throw withDiscardedCount(streamFn.error, accumulated.size);
+  if (signal?.aborted) throw withDiscardedCount(new Error('Observer aborted; coverage not advanced'), accumulated.size);
 
-  if (agentError) {
-    throw new Error(`Observer API error: ${agentError}`);
+  // The turn cap ended the run before the model ever closed the chunk: the
+  // partial batch is not completed coverage, so returning it as success would
+  // advance coversUpToId and silently drop the tail of the chunk. Throwing
+  // keeps the cursor where it is and lets the stage's fallback chain retry.
+  // A valid close already settled the chunk, so a cap firing after it changes
+  // nothing. Local D4: unlike upstream, a cap firing before anything was
+  // recorded also throws instead of advancing the cursor as "empty" — the
+  // model spent the whole budget without declaring the chunk covered. The
+  // message names no status code: this is a config limit, not a provider
+  // failure, so it must not cool a session model as deterministic.
+  if (!providerFailed && turnCap?.exhausted && !closedByCompleteBatch) {
+    throw new WorkerStreamError(
+      `Observer turn cap exhausted: ${accumulated.size} observation${accumulated.size === 1 ? "" : "s"} recorded with no complete=true close`,
+      accumulated.size,
+      true,
+    );
+  }
+
+  // A run that already closed the chunk with a valid complete=true batch that
+  // recorded something keeps its result however the loop ended: a trailing
+  // turn that errors after the close must not discard the declared coverage,
+  // or the cursor never advances and the stage re-observes the same chunk
+  // every cycle. An empty close still throws, so a provider failing after
+  // every tool call cannot turn each chunk into a silent "nothing new" skip.
+  // Any other incomplete run means the chunk may be partly covered.
+  if (agentError && !(closedByCompleteBatch && accumulated.size > 0)) {
+    // The message stays byte-identical: isDeterministicError scans it for bare
+    // 4xx codes, so an interpolated observation count could misclassify it.
+    throw new WorkerStreamError(workerStreamErrorMessage("Observer", agentError), accumulated.size);
   }
 
   if (accumulated.size === 0) {
@@ -401,5 +467,8 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
     return { observations: undefined, emptyReason };
   }
 
-  return { observations: Array.from(accumulated.values()) };
+  return {
+    observations: Array.from(accumulated.values()),
+    ...(agentError ? { errorAfterClose: agentError } : {}),
+  };
 }

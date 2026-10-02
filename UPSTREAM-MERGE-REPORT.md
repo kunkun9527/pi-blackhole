@@ -1,43 +1,41 @@
-# 开发版同步验收记录
+# 上游同步验收记录
 
-上一次（a00bf11 / 0.5.8）的记录见 git 历史：`git log -p -- UPSTREAM-MERGE-REPORT.md`。
+上一次（a621e01 / 0.5.9）的记录见 git 历史：`git log -p -- UPSTREAM-MERGE-REPORT.md`。
 
 ## 来源与结果
 
-- dev commit：`a621e01f0fc65c28cedac643ff9325f6f9fa3673`（v0.5.9；上一基线 `a00bf11`）。
-- 合并方式：fork `main`（上一提交 `28cd883`）执行 `git merge origin/dev`，10 个文件内容冲突，另有测试目录改名 / 删除冲突，逐个手工合并。
-- 本地验收：`tsc --noEmit` 通过；`bun test ./tests/` 71 项全部通过。
-- 上游全量 suite（vitest 5.0.1）：2328 通过，21 失败，共 2349。**没有全部通过**；21 项失败都是本地策略造成的，已登记在 `docs/LOCAL-DIVERGENCE.md`（D2 20 项，D5 1 项），下文也有汇总。
+- 上游：tag `v0.5.10`（`be64de823f27d8be4195dbe0734409017b05240f`；上一基线 `a621e01`）。只合并发版 tag，`v0.5.10` 之后 dev 上未发版的提交（正则回溯、状态栏等修复）不合并。
+- 合并方式：fork `main`（上一提交 `7d52ba8`）执行 `git merge --no-ff v0.5.10`。6 个文件冲突：`README.md`、`package.json`、`pnpm-lock.yaml` 取本地；observer、reflector、dropper 三个 agent 逐处手工合并（D4）。上游新增的 `tests/dropper-stream-error.test.ts`、`tests/reflector-stream-error.test.ts` 移到 `upstream-tests/`。
+- 本地验收：`tsc --noEmit` 通过；`bun test ./tests/` 73 项全部通过；Pi 1.0.0 加载器与 inline 探针通过。
+- 上游全量 suite（vitest 5.0.1）：2431 通过，25 失败，共 2456。25 项都已登记在 `docs/LOCAL-DIVERGENCE.md`（D2 20 项、D4 3 项、D5 1 项、D12 环境 1 项），下文汇总。
 
 ## 上游变更与处理
 
 | 上游变更 | 处理 |
 | --- | --- |
-| dropper 压力基准由 `0.7 × reflectorInputMaxTokens` 改为 `observationsPoolMaxTokens` | 采用。本地配置（池上限 20000、reflector 输入 100000）下，之前的压力清理实际从未触发 |
-| 压力运行以整个活动池为候选（`livePoolObservations`，ID 去重、pending drop 墓碑） | 采用；token 求和仍按 content 重算（D2），超大池由本地 `planInputBatches` 分批（D5） |
-| worker 单次调用硬超时 `workerAttemptTimeoutMs`（`runWorkerAttempt`） | 采用，三个阶段都接入；默认关闭 |
-| `record_observations` / `record_reflections` 的 `complete` 早停 | 采用。本地 `agentCompletionError` 增加 `completedByTool` 参数，只放行这种正常结束的 `toolUse`（D4），否则每次早停都会被当成失败，observer 整批失败 |
-| `cacheRetention`（prompt cache 保留时长） | 采用，三个阶段透传；默认不设置 |
-| `showWorkerNotifications`（可关闭常规进度提示） | 采用；三个阶段的提示文字恢复为上游原文 |
-| recall `#N:path`：`expandEntryFileDetailed` + `capDrillDownText`（按行截断、给出续读坐标） | 采用，并给 `capDrillDownText` 加本地 token 上限（D8） |
-| 状态栏无 UI 守卫（本地 PR #128） | 采用，`status-bar.ts` 与上游一致，D11 回归上游 |
-| 删除未使用的 configure / status overlay 及其测试 | 采用 |
-| `providerIdleTimeout` 持久化、泄漏 `GIT_DIR` 防护、`example-config.json` 完整性测试 | 采用；示例配置补上本地 `recallResponseMaxTokens` |
-| observer 在部分结果后报错仍推进覆盖；从新到旧截断积压 | 上游仍未修；本地已有 D3 / D4，保留 |
+| #137 worker 出错处理：`WorkerStreamError`（带丢弃条数）、固定报错文字、`closedByCompleteBatch`、reflector `errorAfterClose`、`turnCap.exhausted` | 采用。D4 只保留两条：`length`/`toolUse`/`aborted` 也算未完成；轮数用尽且没有有效收尾时一律抛错（上游「一条没记就当空结果并推进」会跳过整段内容） |
+| provider 错误与轮数上限同时出现时报告 provider 错误 | 采用（本地用 `providerFailed` 判断，否则 D4 的轮数检查会抢先） |
+| reflector 返回值改为 `{ reflections, errorAfterClose }` | 采用；本地 D5 分批分支同步改为合并各批结果、保留第一条 `errorAfterClose`；`scripts/verify-live-workers.ts` 和 `tests/om-batch-safety.test.ts` 跟着改 |
+| `/blackhole` 首次使用前预加载配置（manual 模式首次会被忽略） | 采用 |
+| 判断能否压缩时带上当前模型设置（`compaction.modelOverrides`） | 采用 |
+| 分支内容不足时提示「还没有可压缩的内容」，取消时少一条重复提示 | 采用 |
+| 可重试状态码（429、5xx）只匹配完整数字 | 采用 |
+| devDependencies 升级（pi 0.87.1、typebox 1.3.34、oxlint 等） | 不跟进；本地链接全局 pi，见 D12 |
 
 ## 剩余上游断言差异（本地策略）
 
 - **D2（20 项）**：fixture 里 `tokenCount` 写得很大，content 却很短，本地按 content 算出的池很小，达不到压力阈值。
   - `pool-consistency.test.ts` 12 项。
-  - `consolidation.test.ts`「dropper pressure valve」6 项，「showWorkerNotifications」dropper 2 项。把 `progress.ts` 和 `dropper/agent.ts` 临时改回 `tokenCount` 后这 8 项全部通过，说明失败只来自 token 计量，压力逻辑本身和上游一致。
+  - `consolidation.test.ts`「dropper pressure valve」6 项，「showWorkerNotifications」dropper 2 项。
+- **D4（3 项）**：observer、reflector、dropper 各 1 项，断言「轮数用尽、一条没记时当空结果」。本地改为抛错、保留游标。
 - **D5（1 项）**：`consolidation.test.ts`「skips an undersized primary model for an uncapped pressure prompt and uses fallback」。本地没有 consolidation 层的窗口预检，改为在 agent 内分批。
+- **D12 环境（1 项）**：`pi-extension-api.test.ts`「preserves callback argument types」。`node_modules` 里是 Pi 1.0.0，上游测试替身按 0.87.1 写，缺 Pi 1.0 新增成员。
 
 ## 已完成的测试适配
 
-- 本地 `tests/om-input-budget.test.ts`、`scripts/smoke-om-manual.ts`：模拟的 `resolveModel` 补上 `source: "session"`，模拟的 runtime 补上 `tryEmitWorkerInfo`，以对齐 0.5.9 的类型。
-- `upstream-tests/consolidation.test.ts`「worker attempt hard timeout」：先预热 observer 模块，再开启假计时器（原因见 D5「测试适配」）。
+- 本地 `tests/agent-turn-limit-087.test.ts`：轮数上限的断言从「Incomplete agent response (toolUse)」改为 `turnCapExhausted` 的 `WorkerStreamError`。行为不变：依旧抛错、不提交部分结果。
 
 ## 文件与风险边界
 
-- 全量 JSON 曾放在 `R:/Temp/blackhole-upstream-059.json`（内存盘，重启后会丢失）；结论以本文件为准。
+- 全量 JSON 曾放在 `R:/Temp/blackhole-upstream-0510.json`（内存盘，重启后会丢失）；结论以本文件为准。
 - 没有调用远程模型，也没有压缩真实会话。交互运行要完全重启 pi 后再验证。

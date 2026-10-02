@@ -32,7 +32,9 @@ for (const stage of ['observer', 'reflector', 'dropper'] as const) {
       : stage === 'reflector'
         ? runReflector({ ...common, observations: [observation], reflections: [] })
         : runDropper({ ...common, observations: [observation], reflections: [], budgetTokens: 1 });
-    await assert.rejects(run, /Incomplete agent response.*toolUse/);
+    // 0.5.10: the cap surfaces as a typed WorkerStreamError (turnCapExhausted) so the
+    // stage neither cools nor re-runs the session model on the same budget.
+    await assert.rejects(run, (error: any) => error?.name === 'WorkerStreamError' && error.turnCapExhausted === true && /turn cap exhausted/.test(error.message));
     assert.equal(calls, 1);
   });
 }

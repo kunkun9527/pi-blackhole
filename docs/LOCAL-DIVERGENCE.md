@@ -2,9 +2,9 @@
 
 本文件是本地版 `pi-blackhole-local` 与上游 `k0valik/pi-blackhole` 所有行为差异的单一事实来源。以下三种情况必须先读本文件：解决合并冲突、修改下表涉及的文件、判断某个上游测试失败是不是预期。
 
-- 对照基线：上游 dev `a621e01`（v0.5.9）。对比命令：`git diff a621e01 main -- src index.ts ':!*.test.ts'`（整合树 `R:/pi-blackhole-integration`）。
-- 差异规模：25 个源码文件，+835 / −830 行，新增文件仅 `src/om/input-budget.ts`。
-- 上游全量 vitest 在该基线下 2328 / 2349 通过，21 项失败全部是下文登记的「上游预期失败」。
+- 对照基线：上游 `v0.5.10`（`be64de8`）。对比命令：`git diff be64de8 main -- src index.ts ':!*.test.ts'`（整合树 `R:/pi-blackhole-integration`）。
+- 差异规模：25 个源码文件，+921 / −875 行，新增文件仅 `src/om/input-budget.ts`。
+- 上游全量 vitest 在该基线下 2431 / 2456 通过，25 项失败全部是下文登记的「上游预期失败」（D2 20 项、D4 3 项、D5 1 项、D12 环境 1 项）。
 - 同步、验收、部署流程见根目录 `LOCAL-MAINTENANCE.md`。
 
 ## 总览
@@ -89,15 +89,23 @@
 
 ## D4 完成判定严格化
 
-**目的**：上游只在「报错且一条结果都没有」时才抛错；只要记下了部分结果就当成功并推进覆盖，未处理的部分永久漏记。
+**目的**：上游 0.5.9 只在「报错且一条结果都没有」时才抛错，记下部分结果就当成功并推进覆盖。上游 0.5.10（#137）已改成部分结果后出错不推进；本地在此基础上更严格。
 
-**实现**（`src/om/input-budget.ts` `agentCompletionError`，三个 agent 共用）：最后一条带 `stopReason` 的消息为 `error`、`aborted`、`length`、`toolUse`（轮数用尽仍想调工具）或 signal 已中止时，整个运行抛错，不返回部分结果；`budgetedStream` 记录的预算错误同样抛出。
+**实现**（`src/om/input-budget.ts` `agentCompletionError`，三个 agent 共用）：最后一条带 `stopReason` 的消息为 `error`、`aborted`、`length`、`toolUse`（轮数用尽仍想调工具）或 signal 已中止时，整个运行抛错，不返回部分结果；`budgetedStream` 记录的预算错误同样抛出。上游只看 `error`。
 
-**例外（0.5.9 早停）**：`record_observations` / `record_reflections` 带 `complete=true` 且本批无拒收时返回 `terminate`，pi 在该工具结果后直接结束循环，最后一条 assistant 消息的 `stopReason` 仍是 `toolUse`。agent 把「最近一批是否 terminate」传给 `agentCompletionError(msgs, signal, completedByTool)`，只有这种情况放行；`error`、`aborted`、`length` 照常抛错。
+**例外（早停）**：`record_observations` / `record_reflections` 带 `complete=true` 且本批无拒收时返回 `terminate`，pi 在该工具结果后直接结束循环，最后一条 assistant 消息的 `stopReason` 仍是 `toolUse`。agent 把「最近一批是否 terminate」传给 `agentCompletionError(msgs, signal, completedByTool)`，只有这种情况放行。
+
+**0.5.10 起采用上游的部分**：错误类型 `WorkerStreamError`（带 `discardedCount`，日志记录丢弃条数）、`workerStreamErrorMessage` 固定报错文字（避免误判为确定性错误而冷却模型）、`closedByCompleteBatch`（已用 `complete=true` 有效收尾且记下内容后，后续轮次出错仍保留结果；reflector 以 `errorAfterClose` 交给 stage 分类冷却）、`turnCap.exhausted` 与 `turnCapExhausted` 标记（轮数上限不冷却模型）。真实的 provider 错误（`stopReason: "error"`）优先于轮数上限报告，与上游顺序一致。
+
+**与上游的剩余差异**：轮数用尽且没有有效收尾时一律抛错（`turnCap.exhausted && !closedByCompleteBatch`，dropper 为 `turnCap.exhausted`）。上游在「一条都没记」时当作空结果并推进覆盖，那一段内容会被直接跳过；本地保留游标，下次重试。
 
 **代价**：一批需要超过 `agentMaxTurns`（默认 16）轮才能处理完时会整批失败，下次触发重试同一批，产生重复调用。遇到这种日志时先调大 `agentMaxTurns` 或调小 `observerChunkMaxTokens`。
 
-**测试**：`tests/agent-turn-limit-087.test.ts`、`tests/om-batch-safety.test.ts`（中止、输出截断、未完成工具响应不算完成）、`tests/om-input-budget.test.ts`（部分记录后失败不得报告成功）。
+**测试**：`tests/agent-turn-limit-087.test.ts`（轮数上限抛 `turnCapExhausted` 的 `WorkerStreamError`）、`tests/om-batch-safety.test.ts`（中止、输出截断、未完成工具响应不算完成）、`tests/om-input-budget.test.ts`（部分记录后失败不得报告成功）。
+
+**上游预期失败**（3 项，都是「轮数用尽、一条没记时当作空结果」）：`observer.test.ts`「does not throw when the turn cap ends a run that recorded nothing」、`reflector-stream-error.test.ts`「returns undefined reflections when the turn cap cuts a run that recorded nothing」、`dropper-stream-error.test.ts`「returns undefined when the turn cap cuts a run that proposed nothing」。
+
+**合并注意**：上游改这三个 agent 的收尾判断时，保留 `agentCompletionError` 和「轮数用尽未收尾即抛错」，其余采用上游。
 
 ## D5 worker 输入预算与分批
 
@@ -205,6 +213,9 @@
 - `tests/`：本地 bun 测试；上游 vitest 测试放在整合树 `upstream-tests/`，不部署。
 - 安装目录文件为 CRLF；整合树 `core.autocrlf=true`。
 - 其他估算替换：`before-compact.ts` 的 `keptTokensEst`（上游为字符数 ÷ 4）、`core/compaction-chain.ts` 的压缩后估算（上游为宿主 `estimateTokens`）都改用 `estimateEntryTokens`。
+- 上游 devDependencies 升级（pi 0.87.1、typebox 1.3.34、oxlint 等）不跟进：本地通过 `link-host.mjs` 使用全局 pi，peerDependencies 不变。
+
+**上游预期失败（环境）**：`pi-extension-api.test.ts`「preserves callback argument types through capture and replay」。整合树 `node_modules` 联接到安装目录，里面是 Pi 1.0.0；上游测试替身按 0.87.1 写，缺 Pi 1.0 新增的 `getSettings`、`registerMcpServer` 等成员，类型检查不通过。与本地代码无关。
 
 ---
 
@@ -244,3 +255,8 @@
 - 状态栏：`src/om/status-bar.ts` 与上游完全一致（无 UI 守卫即本地 PR #128，上游已合并），D11 不再是差异；状态栏 P 值仍经 `observationPoolTokens()` 走 D2。
 - worker 硬超时、`complete` 早停、`cacheRetention`、`showWorkerNotifications`、dropper 压力基准修复、`livePoolObservations`。
 - 三个阶段的进度提示文字恢复为上游原文（数字仍是本地估算）。
+
+2026-10-02 同步 v0.5.10（`be64de8`）时采用：
+- worker 出错处理（上游 #137）：`WorkerStreamError`、`withDiscardedCount`、`closedByCompleteBatch`、reflector `errorAfterClose`、`turnCap.exhausted`。D4 缩小为只剩「`length`/`toolUse`/`aborted` 也算未完成」和「轮数用尽未收尾即抛错」两条。
+- `/blackhole` 首次使用前预加载配置、按当前模型设置判断能否压缩、内容不足时提示而不是报两次失败、取消时少一条重复提示、可重试状态码只匹配完整数字。
+- 只同步到发版 tag；`v0.5.10` 之后 dev 上未发版的提交（正则回溯修复等）不合并。
