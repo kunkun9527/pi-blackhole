@@ -20,10 +20,13 @@ test('keys pasted into Chinese and English chat are masked', () => {
     `api_key = "${HEX64}"`,
     `数据库密码：Xk82mQp4Lz9RtV3nWc7Y`,
     `连接串 postgres://admin:hunter2pass@db.local:5432/app`,
+    // Vendor formats whose random body happens to contain no digits.
+    'AKIA' + 'QWERTYUIOPASDFGH 是访问密钥',
+    'hf' + '_AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh',
   ]) {
     const out = redactSecrets(text);
     assert.match(out, /\[REDACTED [a-z-]+\]/, text.slice(0, 30));
-    assert.ok(!/[0-9a-f]{32}|a8F3kL9q|Xk82mQp4|hunter2pass/.test(out), out);
+    assert.ok(!/[0-9a-f]{32}|a8F3kL9q|Xk82mQp4|hunter2pass|QWERTYUIOP|AbCdEfGhIj/.test(out), out);
   }
 });
 
@@ -37,6 +40,7 @@ test('identifiers, digests, paths and model ids are kept', () => {
     'read C:/Users/Su/.pi/agent/sessions/2026-09-28T20-13-43-175Z_01a0e9a6-e186.jsonl for auth',
     'api: normalizeSourceAddressedBranchEntries2 handles token windows',
     `api key image sha256:${HEX64}`,
+    'use sk-learn-compatible-estimators for the token classifier',
     `token budget check passed at commit ${HEX64.slice(0, 40)}`,
   ]) {
     assert.equal(redactSecrets(text), text);

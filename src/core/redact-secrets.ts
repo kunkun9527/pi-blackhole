@@ -12,7 +12,7 @@
 
 const marker = (kind: string): string => `[REDACTED ${kind}]`;
 
-// Vendor formats. Bodies need ≥2 digits to avoid matching prose like "sk-learn-…".
+// Vendor formats: the fixed prefix is enough evidence on its own.
 const KNOWN_FORMATS: ReadonlyArray<readonly [kind: string, pattern: RegExp]> = [
   [
     "private-key",
@@ -47,6 +47,8 @@ const ASSIGNED_TO_SECRET =
 
 const digitCount = (s: string): number => s.replace(/[^0-9]/g, "").length;
 const letterCount = (s: string): number => s.replace(/[^A-Za-z]/g, "").length;
+// `sk-` also starts prose like "sk-learn-compatible"; real keys contain digits or capitals.
+const isProse = (match: string): boolean => match.startsWith("sk-") && !/[0-9A-Z]/.test(match.slice(3));
 
 const entropy = (s: string): number => {
   const counts = new Map<string, number>();
@@ -94,9 +96,7 @@ export function redactSecrets(text: string): string {
   if (!text) return text;
   let out = text;
   for (const [kind, pattern] of KNOWN_FORMATS) {
-    out = out.replace(pattern, (match) =>
-      kind === "private-key" || kind === "jwt" || digitCount(match) >= 2 ? marker(kind) : match,
-    );
+    out = out.replace(pattern, (match) => (isProse(match) ? match : marker(kind)));
   }
   out = out.replace(URL_PASSWORD, (_m, prefix: string) => `${prefix}${marker("password")}@`);
   return out.replace(CANDIDATE, (token, offset: number, whole: string) => {
