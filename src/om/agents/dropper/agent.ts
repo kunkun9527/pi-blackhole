@@ -29,6 +29,7 @@ import {
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { reflectionToSummaryLine, type Observation, type Reflection } from "../../ledger/index.js";
 import { DROPPER_SYSTEM } from "./prompts.js";
+import { redactSecrets } from "../../../core/redact-secrets.js";
 import { agentCompletionError, initialInputLimit } from "../../input-budget.js";
 import {
   agentContextLimit,
@@ -370,7 +371,7 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
     contextCap,
   );
   const render = (items: Observation[]) =>
-    `CURRENT REFLECTIONS (context only):\n${priorReflections}\n\nEXISTING ACTIVE OBSERVATIONS (context only, not drop candidates):\n${priorObservations}\n\nNEW OBSERVATIONS TO EVALUATE FOR DROPPING:\n${joinOrEmpty(items.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}\n\nPool: ${observationTokens} tokens; budget: ${budgetTokens}; fullness: ${fullnessPercent}%. Drop urgency: ${urgency}. Maximum drops allowed this run: ${maxDropsAllowed}. This is a hard upper bound, not a target. Drop fewer or none unless clearly safe.`;
+    redactSecrets(`CURRENT REFLECTIONS (context only):\n${priorReflections}\n\nEXISTING ACTIVE OBSERVATIONS (context only, not drop candidates):\n${priorObservations}\n\nNEW OBSERVATIONS TO EVALUATE FOR DROPPING:\n${joinOrEmpty(items.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}\n\nPool: ${observationTokens} tokens; budget: ${budgetTokens}; fullness: ${fullnessPercent}%. Drop urgency: ${urgency}. Maximum drops allowed this run: ${maxDropsAllowed}. This is a hard upper bound, not a target. Drop fewer or none unless clearly safe.`);
   const batches = planInputBatches(
     observations,
     (items) =>

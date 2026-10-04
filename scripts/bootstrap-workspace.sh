@@ -79,7 +79,8 @@ fi
 HOOKS="$(git -C "$UP" rev-parse --path-format=absolute --git-common-dir)/no-hooks"
 mkdir -p "$HOOKS"
 git -C "$UP" config core.hooksPath "$HOOKS"
-mkdir -p M:/Temp
+# M:/tmp: upstream vitest mkdtemp('/tmp/...') resolves to the cwd drive.
+mkdir -p M:/Temp M:/tmp
 
 step "4/5 state"
 deployed="$(python -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['integrationCommit'])" "$INSTALLED/deployment-manifest.json")"

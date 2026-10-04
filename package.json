@@ -1,6 +1,6 @@
 {
   "name": "pi-blackhole-local",
-  "version": "0.5.10-dev.be64de8.local.1",
+  "version": "0.5.10-dev.be64de8.local.2",
   "private": true,
   "description": "Pi Blackhole v0.5.10 (be64de8) with Chinese safety, bounded recall, lossless batching and Pi 0.87 compatibility",
   "license": "MIT",

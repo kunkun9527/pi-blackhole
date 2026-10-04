@@ -3,7 +3,7 @@
 本文件是本地版 `pi-blackhole-local` 与上游 `k0valik/pi-blackhole` 所有行为差异的单一事实来源。以下三种情况必须先读本文件：解决合并冲突、修改下表涉及的文件、判断某个上游测试失败是不是预期。
 
 - 对照基线：上游 `v0.5.10`（`be64de8`）。对比命令：`git diff be64de8 main -- src index.ts ':!*.test.ts'`（整合树 `M:/pi-blackhole-integration`）。
-- 差异规模：25 个源码文件，+921 / −875 行，新增文件仅 `src/om/input-budget.ts`。
+- 差异规模：28 个源码文件，+1050 / −878 行，新增文件 `src/om/input-budget.ts`、`src/core/redact-secrets.ts`。
 - 上游全量 vitest 在该基线下 2431 / 2456 通过，25 项失败全部是下文登记的「上游预期失败」（D2 20 项、D4 3 项、D5 1 项、D12 环境 1 项）。
 - 同步、验收、部署流程见根目录 `LOCAL-MAINTENANCE.md`。
 
@@ -23,6 +23,7 @@
 | D10 | recall 折叠显示接入 | 本地集成 | recall 工具注册 |
 | ~~D11~~ | 状态栏无 UI 时停用（0.5.9 起已回归上游） | — | — |
 | D12 | 打包与工程 | 工程 | 入口、依赖、测试 |
+| D13 | 凭据脱敏 | 安全，全语言 | 压缩摘要、三个后台 worker 的输入与记忆输出 |
 
 ---
 
@@ -217,6 +218,16 @@
 
 **上游预期失败（环境）**：`pi-extension-api.test.ts`「preserves callback argument types through capture and replay」。整合树 `node_modules` 联接到安装目录，里面是 Pi 1.0.0；上游测试替身按 0.87.1 写，缺 Pi 1.0 新增的 `getSettings`、`registerMcpServer` 等成员，类型检查不通过。与本地代码无关。
 
+## D13 凭据脱敏
+
+上游原样把对话里的 API key 抄进压缩摘要和观察记忆（审计中见过同一把 key 在多次压缩摘要里反复出现）。本地版在派生内容里把凭据换成 `[REDACTED <类型>]`；会话原始 JSONL 和 `recall` 检索原文不变。
+
+- `src/core/redact-secrets.ts` `redactSecrets()`：两层规则。① 固定前缀的厂商格式（`sk-`、`KGAT_`、`ghp_`/`github_pat_`、`glpat-`、`hf_`、`xox?-`、`AIza`、`AKIA`/`ASIA`、JWT、PEM 私钥）以及 URL 里的 `user:password@`；② 同一行前后 40 字符内有凭据关键词（apikey、token、secret、password、密钥、凭据、密码等）的长随机串，要求最长段 ≥16 字符、字母数字混合、熵 ≥3，并排除路径/URL 片段、驼峰标识符、`id:`/`*_id`/`page token` 标签后的值；40/64 位十六进制摘要（提交哈希）也排除，除非紧跟在 `api_key =`、`密钥：` 这类显式赋值之后。
+- 接入点：`core/summarize.ts` 的 `compile()`（合并旧摘要后再脱敏，旧摘要里继承的 key 也会被遮掉）和 `compileSegment()`；`hooks/before-compact.ts` 渲染 OM 区块后脱敏（遮住启用前已写入的记忆）；observer `observerText()`、reflector/dropper 的 `render()` 是 worker 的完整用户输入，预算计算与真实请求用同一份脱敏文本。`observer/prompts.ts` 另加一条：只记录凭据存在和配置位置，不记录值，兜住检测规则漏掉的情况。
+- 选择手写规则而非 gitleaks/secretlint：两者都按代码里 `key = value` 的写法设计，用户在聊天里贴 key（「这是我的 apikey，<key>」、key 写在关键词之前、没有赋值符）抓不到。2026-10-04 用 gitleaks 当时的 222 条规则检查本地 4 条真实泄露消息，0 条命中。另外 gitleaks 规则是 Go RE2 语法，其中 30 条在中间带 `(?i)`，JS 不能直接用。
+- 实测（本地 12 天会话，约 4.7 万条消息/摘要、9400 万字符）：被遮的 19 个唯一值都是凭据或凭据示例，含审计里发现的全部真实 key；未见误遮代码标识符、会话 id、提交哈希、模型名。
+- 测试：`tests/redact-secrets.test.ts`。
+
 ---
 
 ## 文件 → 差异索引（解决冲突用）
@@ -226,18 +237,20 @@
 | `index.ts` | D10 |
 | `src/commands/memory.ts` | D2 |
 | `src/core/build-sections.ts` | D6 |
+| `src/core/redact-secrets.ts`（本地新增）、`src/core/summarize.ts` | D13 |
 | `src/core/compaction-chain.ts` | D12 |
 | `src/core/config-env.ts`、`src/core/unified-config.ts`、`example-config.json` | D8 |
 | `src/core/format-recall.ts`、`src/core/recall-budget.ts`、`src/tools/recall.ts` | D8 |
 | `src/details.ts`、`src/hooks/compaction-context.ts` | D9 |
-| `src/hooks/before-compact.ts` | D9、D12 |
+| `src/hooks/before-compact.ts` | D9、D12、D13 |
 | `src/extract/goals.ts`、`src/extract/preferences.ts` | D6 |
 | `src/om/tokens.ts` | D1 |
 | `src/om/input-budget.ts`（本地新增） | D3、D4、D5 |
 | `src/om/consolidation.ts` | D2、D3、D5 |
-| `src/om/agents/observer/agent.ts` | D3、D4、D5 |
-| `src/om/agents/reflector/agent.ts` | D4、D5 |
-| `src/om/agents/dropper/agent.ts` | D2、D4、D5 |
+| `src/om/agents/observer/agent.ts` | D3、D4、D5、D13 |
+| `src/om/agents/observer/prompts.ts` | D13 |
+| `src/om/agents/reflector/agent.ts` | D4、D5、D13 |
+| `src/om/agents/dropper/agent.ts` | D2、D4、D5、D13 |
 | `src/om/agents/dropper/coverage.ts`、`src/om/ledger/projection.ts`、`src/om/ledger/progress.ts` | D2（progress 另含 D5 的 `boundedContext`） |
 | `src/project-recall/dedup.ts`、`src/project-recall/format-export.ts` | D7 |
 

@@ -27,6 +27,7 @@ import { hashId } from "../../ids.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { truncateRecordContent } from "../../serialize.js";
 import { REFLECTOR_SYSTEM } from "./prompts.js";
+import { redactSecrets } from "../../../core/redact-secrets.js";
 import { estimateStringTokens } from "../../tokens.js";
 import { agentCompletionError, initialInputLimit } from '../../input-budget.js';
 import { agentContextLimit, agentInputLimit, agentInputTokens, boundedContext, budgetedStream, planInputBatches, userPrompt, type InputBudgetOptions } from '../../input-budget.js';
@@ -262,7 +263,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
   const contextCap = Math.floor(limit * 0.1);
   const priorReflections = boundedContext([...(args.existingReflectionsSummary?.split('\n') ?? []), ...reflections.map(reflectionToSummaryLine)], contextCap);
   const priorObservations = boundedContext(args.existingObservationsSummary?.split('\n') ?? [], contextCap);
-  const render = (items: Observation[]) => `EXISTING REFLECTIONS (context only):\n${priorReflections}\n\nEXISTING OBSERVATIONS (context only):\n${priorObservations}\n\nNEW OBSERVATIONS TO PROCESS:\n${joinOrEmpty(items.map(observationToSummaryLine))}\n\nCrystallize any missing durable facts or patterns into new reflections. Use complete=false for a partial batch or a correction, and use complete=true only on the final valid batch once every active observation has been reviewed. If nothing is stable enough, do not call the tool.`;
+  const render = (items: Observation[]) => redactSecrets(`EXISTING REFLECTIONS (context only):\n${priorReflections}\n\nEXISTING OBSERVATIONS (context only):\n${priorObservations}\n\nNEW OBSERVATIONS TO PROCESS:\n${joinOrEmpty(items.map(observationToSummaryLine))}\n\nCrystallize any missing durable facts or patterns into new reflections. Use complete=false for a partial batch or a correction, and use complete=true only on the final valid batch once every active observation has been reviewed. If nothing is stable enough, do not call the tool.`);
   const batches = planInputBatches(observations, items => agentInputTokens(REFLECTOR_SYSTEM, [recordReflections], userPrompt(render(items))) <= initialInputLimit(limit), 'Reflector');
   if (batches.length > 1) {
     const results = new Map<string, Reflection>();

@@ -40,7 +40,7 @@ Converts raw Pi `Message[]` into `NormalizedBlock[]`. Defined in [[src/core/norm
 - **toolResult** → name + text + isError flag
 - **bashExecution** → command + output + exitCode
 
-Uses [[src/core/sanitize.ts]] to strip ANSI codes and control characters before normalization.
+Uses [[src/core/sanitize.ts]] to strip ANSI codes and control characters before normalization. The compiled summary then passes through [[src/core/redact-secrets.ts]], which replaces credentials with `[REDACTED <kind>]` (local divergence D13).
 
 ### filterNoise
 

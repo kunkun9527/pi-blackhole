@@ -24,6 +24,7 @@ import type { Static } from "typebox";
 import { hashId } from "../../ids.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { OBSERVER_SYSTEM } from "./prompts.js";
+import { redactSecrets } from "../../../core/redact-secrets.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
@@ -126,7 +127,7 @@ const OBSERVER_TOOL_DESCRIPTION =
   "complete=true ends fully valid chunk coverage; use complete=false when more observations or corrections remain. " +
   "Incomplete or rejected work stays open.";
 function observerText(chunk: string, reflections: readonly string[], observations: readonly string[]): string {
-  return `CURRENT REFLECTIONS:\n${reflections.join('\n') || '(none yet)'}\n\nCURRENT OBSERVATIONS:\n${observations.join('\n') || '(none yet)'}\n\nCompress the following new conversation chunk into observations by calling record_observations one or more times. Use complete=false for partial batches or corrections, and use complete=true only on the final valid batch after the chunk is fully covered. If no observations are warranted, close the run with one record_observations call carrying an empty observations array and complete=true. Do not restate facts already present in current reflections or current observations.\n\nNEW CONVERSATION CHUNK:\n${chunk}`;
+  return redactSecrets(`CURRENT REFLECTIONS:\n${reflections.join('\n') || '(none yet)'}\n\nCURRENT OBSERVATIONS:\n${observations.join('\n') || '(none yet)'}\n\nCompress the following new conversation chunk into observations by calling record_observations one or more times. Use complete=false for partial batches or corrections, and use complete=true only on the final valid batch after the chunk is fully covered. If no observations are warranted, close the run with one record_observations call carrying an empty observations array and complete=true. Do not restate facts already present in current reflections or current observations.\n\nNEW CONVERSATION CHUNK:\n${chunk}`);
 }
 /** Choose an oldest-first contiguous prefix using the exact initial prompt layout. */
 export function prepareObserverInput(entries: RenderableEntry[], model: any, options: InputBudgetOptions, reflections: string[], observations: string[]) {
