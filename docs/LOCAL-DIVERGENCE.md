@@ -222,11 +222,12 @@
 
 上游原样把对话里的 API key 抄进压缩摘要和观察记忆（审计中见过同一把 key 在多次压缩摘要里反复出现）。本地版在派生内容里把凭据换成 `[REDACTED <类型>]`；会话原始 JSONL 和 `recall` 检索原文不变。
 
-- `src/core/redact-secrets.ts` `redactSecrets()`：两层规则。① 固定前缀的厂商格式（`sk-`、`KGAT_`、`ghp_`/`github_pat_`、`glpat-`、`hf_`、`xox?-`、`AIza`、`AKIA`/`ASIA`、JWT、PEM 私钥）命中前缀即遮蔽，只有全小写且不含数字的 `sk-…`（如 `sk-learn-…`）当正文保留；URL 里的 `user:password@` 同样遮蔽；② 同一行前后 40 字符内有凭据关键词（apikey、token、secret、password、密钥、凭据、密码等）的长随机串，要求最长段 ≥16 字符、字母数字混合、熵 ≥3，并排除路径/URL 片段、驼峰标识符、`id:`/`*_id`/`page token` 标签后的值；40/64 位十六进制摘要（提交哈希）也排除，除非紧跟在 `api_key =`、`密钥：` 这类显式赋值之后。
-- 接入点：`core/summarize.ts` 的 `compile()`（合并旧摘要后再脱敏，旧摘要里继承的 key 也会被遮掉）和 `compileSegment()`；`hooks/before-compact.ts` 渲染 OM 区块后脱敏（遮住启用前已写入的记忆）；observer `observerText()`、reflector/dropper 的 `render()` 是 worker 的完整用户输入，预算计算与真实请求用同一份脱敏文本。`observer/prompts.ts` 另加一条：只记录凭据存在和配置位置，不记录值，兜住检测规则漏掉的情况。
+- `src/core/redact-secrets.ts` `redactSecrets()`：两层规则。① 固定前缀的厂商格式（`sk-`、`KGAT_`、`ghp_`/`github_pat_`、`glpat-`、`hf_`、`xox?-`、`AIza`、`AKIA`/`ASIA`、JWT、PEM 私钥）命中前缀即遮蔽，只有全小写且不含数字的 `sk-…`（如 `sk-learn-…`）当正文保留；URL 里的 `user:password@` 同样遮蔽（密码可含 `/`；冒号后是纯数字再接 `/`、`?`、`#` 的视为端口，不遮）；② 同一行前后 40 字符内有凭据关键词（apikey、token、secret、password、密钥、凭据、密码等）的长随机串，要求最长段 ≥16 字符、字母数字混合、熵 ≥3，并排除路径/URL 片段、驼峰标识符、`id:`/`*_id`/`page token` 标签后的值；40/64 位十六进制摘要（提交哈希）也排除，除非紧跟在 `api_key =`、`密钥：` 这类显式赋值之后。值单独占一行、上一行以 `"apiKey":`、`password:`、`密钥：` 这类标签结尾（格式化的 JSON、YAML、`.env`）时同样视为显式赋值。候选串包含 base64 的 `/`；含 `/` 的串若一半以上的段是小写单词，按路径保留。
+- 接入点：`core/summarize.ts` 的 `compile()`（合并旧摘要后再脱敏，旧摘要里继承的 key 也会被遮掉）和 `compileSegment()`；`hooks/before-compact.ts` 渲染 OM 区块后脱敏（遮住启用前已写入的记忆）；`core/compaction-chain.ts` 的 `projectAppendOnlyContext()` 读取 append 模式的 segment 和 trailingSummary 时脱敏（遮住启用前冻结的旧条目）；observer `observerText()`、reflector/dropper 的 `render()` 是 worker 的完整用户输入，预算计算与真实请求用同一份脱敏文本。`observer/prompts.ts` 另加一条：只记录凭据存在和配置位置，不记录值，兜住检测规则漏掉的情况。
 - 选择手写规则而非 gitleaks/secretlint：两者都按代码里 `key = value` 的写法设计，用户在聊天里贴 key（「这是我的 apikey，<key>」、key 写在关键词之前、没有赋值符）抓不到。2026-10-04 用 gitleaks 当时的 222 条规则检查本地 4 条真实泄露消息，0 条命中。另外 gitleaks 规则是 Go RE2 语法，其中 30 条在中间带 `(?i)`，JS 不能直接用。
 - 实测（本地 12 天会话，约 4.7 万条消息/摘要、9400 万字符）：被遮的 19 个唯一值都是凭据或凭据示例，含审计里发现的全部真实 key；未见误遮代码标识符、会话 id、提交哈希、模型名。
 - 测试：`tests/redact-secrets.test.ts`。
+- 与上游 PR k0valik/pi-blackhole#146 的关系：PR 是不含中文规则的同一套检测器；2026-10-05 按 PR 机器人审查修过的 URL 密码、base64 `/`、跨行标签和 append tail 已同步回本地。PR 把记忆脱敏放在 ledger 的行格式化函数里（避开 #143 改动的 worker 文件），本地仍在 worker 完整输入处脱敏，覆盖范围不小于 PR。
 
 ---
 
@@ -238,7 +239,7 @@
 | `src/commands/memory.ts` | D2 |
 | `src/core/build-sections.ts` | D6 |
 | `src/core/redact-secrets.ts`（本地新增）、`src/core/summarize.ts` | D13 |
-| `src/core/compaction-chain.ts` | D12 |
+| `src/core/compaction-chain.ts` | D12、D13 |
 | `src/core/config-env.ts`、`src/core/unified-config.ts`、`example-config.json` | D8 |
 | `src/core/format-recall.ts`、`src/core/recall-budget.ts`、`src/tools/recall.ts` | D8 |
 | `src/details.ts`、`src/hooks/compaction-context.ts` | D9 |

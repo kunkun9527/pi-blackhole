@@ -11,6 +11,7 @@ import {
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { getUsageTokens, estimateEntryTokens } from "../om/tokens.js";
+import { redactSecrets } from "./redact-secrets.js";
 
 export interface SessionEntryLike {
   id?: string;
@@ -577,12 +578,14 @@ export function projectAppendOnlyContext(
 
   const segmentMessages = chain.segments.map((item, index) => ({
     role: "compactionSummary",
-    summary: item.segment.summary,
+    // Segments are frozen; masking on read also covers ones written before redaction existed.
+    summary: redactSecrets(item.segment.summary),
     tokensBefore: item.segment.tokensBefore,
     timestamp: timestampOf(item.entry, index),
   }));
 
-  const trailing = latest.details.trailingSummary.trim();
+  // Same for the tail.
+  const trailing = redactSecrets(latest.details.trailingSummary).trim();
   const tailMessages = trailing
     ? [
         {
