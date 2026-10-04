@@ -32,6 +32,7 @@ test('keys pasted into Chinese and English chat are masked', () => {
     '{\n  "apiKey":\n    "3f9a1c7e5b2d4f6a8c0e1b3d5f7a9c2e"\n}',
     'password:\n  Xk82mQp4Lz9RtV3nWc7YbN4pR6tW1y',
     '数据库密码：\n  Xk82mQp4Lz9RtV3nWc7YbN4pR6tW1y',
+    '"apiKey":\n  "Xk82mQp4/abcd/Lz9RtV3nWc7YbN4p"',
   ]) {
     const out = redactSecrets(text);
     assert.match(out, /\[REDACTED [a-z-]+\]/, text.slice(0, 30));
@@ -65,6 +66,20 @@ test('identifiers, digests, paths and model ids are kept', () => {
     'token:\n  /var/lib/app/AbCdEf12GhIjKl34MnOp56',
   ]) {
     assert.equal(redactSecrets(text), text);
+  }
+});
+
+test('only the URL password is masked', () => {
+  for (const [text, expected] of [
+    // A raw `@` inside the password is part of it; the host and path after the last one are kept.
+    ['postgres://admin:pa@ss@db.local/app', 'postgres://admin:[REDACTED password]@db.local/app'],
+    ['postgres://admin:pa@@ss@db.local/app', 'postgres://admin:[REDACTED password]@db.local/app'],
+    ['https://user:p@ss@host/path?email=a@b.com', 'https://user:[REDACTED password]@host/path?email=a@b.com'],
+    // More digits than a port can have: a password, not `host:port/path`.
+    ['redis://svc:20245678/key@cache.internal', 'redis://svc:[REDACTED password]@cache.internal'],
+  ]) {
+    assert.equal(redactSecrets(text), expected);
+    assert.equal(redactSecrets(expected), expected);
   }
 });
 
