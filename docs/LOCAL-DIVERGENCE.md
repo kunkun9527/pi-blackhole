@@ -2,7 +2,7 @@
 
 本文件是本地版 `pi-blackhole-local` 与上游 `k0valik/pi-blackhole` 所有行为差异的单一事实来源。以下三种情况必须先读本文件：解决合并冲突、修改下表涉及的文件、判断某个上游测试失败是不是预期。
 
-- 对照基线：上游 `v0.5.10`（`be64de8`）。对比命令：`git diff be64de8 main -- src index.ts ':!*.test.ts'`（整合树 `R:/pi-blackhole-integration`）。
+- 对照基线：上游 `v0.5.10`（`be64de8`）。对比命令：`git diff be64de8 main -- src index.ts ':!*.test.ts'`（整合树 `M:/pi-blackhole-integration`）。
 - 差异规模：25 个源码文件，+921 / −875 行，新增文件仅 `src/om/input-budget.ts`。
 - 上游全量 vitest 在该基线下 2431 / 2456 通过，25 项失败全部是下文登记的「上游预期失败」（D2 20 项、D4 3 项、D5 1 项、D12 环境 1 项）。
 - 同步、验收、部署流程见根目录 `LOCAL-MAINTENANCE.md`。
@@ -209,7 +209,7 @@
 
 - 入口 `index.ts`（上游 0.5.8 起为 `dist/index.js`）；本地不构建 dist。
 - `package.json`：`private`，名称 `pi-blackhole-local`，版本 `<上游版本>-dev.<commit>.local.<n>`，`blackholeUpstream.commit` 记录基线；pi 依赖为 peerDependencies 0.87.0，通过 `scripts/link-host.mjs` 链接全局 pi。
-- `scripts/`：`smoke-host.mjs`（真实加载器）、`probe-inline-host.ts`（inline 压缩宿主探测）、`deploy-local.py`（部署，只能从整合树运行）、`bootstrap-workspace.sh`（R 盘内存盘清空后重建工作区）。
+- `scripts/`：`smoke-host.mjs`（真实加载器）、`probe-inline-host.ts`（inline 压缩宿主探测）、`deploy-local.py`（部署，只能从整合树运行）、`bootstrap-workspace.sh`（M 盘内存盘清空后重建工作区）。
 - `tests/`：本地 bun 测试；上游 vitest 测试放在整合树 `upstream-tests/`，不部署。
 - 安装目录文件为 CRLF；整合树 `core.autocrlf=true`。
 - 其他估算替换：`before-compact.ts` 的 `keptTokensEst`（上游为字符数 ÷ 4）、`core/compaction-chain.ts` 的压缩后估算（上游为宿主 `estimateTokens`）都改用 `estimateEntryTokens`。

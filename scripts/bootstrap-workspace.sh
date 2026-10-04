@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Rebuild the R: (RAM disk) maintenance workspace for pi-blackhole-local.
+# Rebuild the M: (RAM disk) maintenance workspace for pi-blackhole-local.
 #
-# R: is wiped on reboot. Durable state lives elsewhere:
+# M: is wiped on reboot. Durable state lives elsewhere:
 #   - local patch history: GitHub fork $FORK_URL, branch main
 #     (upstream dev + local patches; upstream is tracked via origin/dev)
 #   - deployed code:       $INSTALLED (+ deployment-manifest.json)
@@ -14,8 +14,8 @@ set -euo pipefail
 
 UPSTREAM_URL="https://github.com/k0valik/pi-blackhole.git"
 FORK_URL="${BH_FORK_URL:-https://github.com/kunkun9527/pi-blackhole.git}"
-UP="${BH_UPSTREAM_DIR:-R:/pi-blackhole-upstream}"
-INT="${BH_INTEGRATION_DIR:-R:/pi-blackhole-integration}"
+UP="${BH_UPSTREAM_DIR:-M:/pi-blackhole-upstream}"
+INT="${BH_INTEGRATION_DIR:-M:/pi-blackhole-integration}"
 INSTALLED="${BH_INSTALLED_DIR:-C:/Users/Su/.pi/agent/local-packages/pi-blackhole-local}"
 SKIP_DEPS=0
 [[ "${1:-}" == "--skip-upstream-deps" ]] && SKIP_DEPS=1
@@ -79,7 +79,7 @@ fi
 HOOKS="$(git -C "$UP" rev-parse --path-format=absolute --git-common-dir)/no-hooks"
 mkdir -p "$HOOKS"
 git -C "$UP" config core.hooksPath "$HOOKS"
-mkdir -p R:/Temp
+mkdir -p M:/Temp
 
 step "4/5 state"
 deployed="$(python -c "import json,sys;print(json.load(open(sys.argv[1],encoding='utf-8'))['integrationCommit'])" "$INSTALLED/deployment-manifest.json")"
