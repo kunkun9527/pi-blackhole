@@ -66,8 +66,10 @@ This edition tracks upstream `dev` (baseline v0.5.10) while hardening key areas 
   *(针对 CJK 字符采用约 1.5 token/字更保守合理的估算规则，消除中文长文本因低估 token 在压缩前挤爆硬上下文上限的隐患)*
 - **Native Semantic Tokenization**: Integrates native `Intl.Segmenter` and bi-gram indexing into `recall` search for accurate keyword discovery and context snippet location without external binary dependencies.  
   *(`recall` 检索集成原生 `Intl.Segmenter` 分词与双字索引，支持中文关键词搜索与上下文定位，标点断句贴合中文习惯)*
-- **Directive & Goal Tracking**: Robustly parses multi-clause Chinese instructions, conditional rules ("如果..."), and negative constraints ("不要..."), accurately recognizing status transitions ("已修复", "仍然报错") to isolate independent sub-goals.  
-  *(精确解析中文复合指令、条件句与否定句；独立追踪子目标状态变迁，防止清除未决问题)*
+- **Directive & Goal Tracking**: Parses multi-clause Chinese instructions, conditional rules ("如果..."), and negative constraints ("不要..."); Session Goal keeps the opening request plus the newest goals, and Outstanding Context lists only unresolved tool errors.  
+  *(解析中文复合指令、条件句与否定句；会话目标保留开头请求和最新目标，未决事项只列未解决的工具错误)*
+- **Memory Language**: Observations and reflections follow the dominant language of the user's messages, and a reflection can replace stale or duplicate ones (kept in the ledger for `recall`).  
+  *(记忆跟随用户消息的主要语言书写；新反思可替换过时或重复的旧反思，旧条目仍可用 `recall` 查到)*
 
 ### 2. Long-Session Memory Durability (长会话记忆完整性保障)
 - **FIFO Chronological Draining**: When observer backlog exceeds a single chunk (e.g. 50k tokens), processes unobserved entries in chronological order (`drain=true`) until fully caught up, ensuring early architectural decisions and debugging insights are preserved during extended multi-tool sessions.  
@@ -263,7 +265,7 @@ After compaction, the agent sees something like this (sections appear only when 
 - a1b2c3d: fix(auth): refresh token after password reset
 
 [Outstanding Context]
-- lint check still failing on line 42
+- [bash] `bun run lint` src/auth/session.ts:42 error: no-unused-vars
 
 [User Preferences]
 - Prefer Vietnamese responses

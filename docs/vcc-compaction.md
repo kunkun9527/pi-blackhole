@@ -68,7 +68,7 @@ Extracts task goals and scope changes from user message blocks. Defined in [[src
 - **Template signals**: Stops at `For each`, `Do NOT implement`
 - **Scope change**: Emits `[Scope change]` marker when detected
 - **Leading test**: Only checks first 200 chars of user blocks (prevents pasted output false positives)
-- **Limit**: Max 8 goals
+- **Limit**: Max 8 goals — the first message (up to 4 lines) plus the newest goals; only the latest `[Scope change]` marker is kept
 
 ### Files extraction
 

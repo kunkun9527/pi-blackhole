@@ -9,7 +9,7 @@
  */
 import type { Message } from "@earendil-works/pi-ai";
 import type { FileOps, NormalizedBlock } from "../types";
-import { clipSentence, firstLine, nonEmptyLines } from "./content";
+import { clip, firstLine, nonEmptyLines } from "./content";
 import type { SectionData } from "../sections";
 import { extractGoals } from "../extract/goals";
 import { extractFiles, formatFileList } from "../extract/files";
@@ -30,26 +30,26 @@ export interface BuildSectionsInput {
   gitTags?: Map<string, string>;
 }
 
-const BLOCKER_RE =
-  /\b(fail(ed|s|ure|ing)?|broken|cannot|can't|won't work|does not work|doesn't work|still (broken|failing|wrong)|blocked|blocker|not (fixed|resolved|working)|crash(es|ed|ing)?)\b/i;
-
-// CJK failure/blocker stems — no \b (CJK has no word boundaries). Kept to
-// unambiguous failure words; conversational hedges like 不行 and 不对 are
-// excluded to avoid chit-chat matches.
-const BLOCKER_CJK_RE = /失败|报错|错误|卡住|崩溃/;
-
-// Benign technical compounds that contain a failure stem but describe
-// mechanism, not malfunction ("add error handling" is not a blocker).
-// Stripped before the stem test, so a line only flags on a *residual* stem:
-// a line with both ("the error handling still 报错") still fires via 报错.
-const CJK_BENIGN_RE = /错误(?:处理|信息|消息|码|类型|日志|堆栈)|失败(?:重试|率)/g;
-
-// Sentence-like start: capital letter, code identifier, quote, CJK bracket —
-// or any CJK character (CJK sentences start with a han character, not ASCII
-// capitals). 【/『/「 lead bracketed CJK headings like 【报错】服务启动失败.
-const SENTENCE_START_RE = /^\s*["'`*_【『「]?[A-Z`\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/;
-
 const OUTSTANDING_CLIP = 200;
+const COMMAND_CLIP = 80;
+
+/** Lines that say a tool failed without saying why. */
+const UNINFORMATIVE_ERROR_LINE_RE =
+  /^(?:\(no output\)|Traceback \(most recent call last\):?|(?:Command )?(?:exited|failed) with (?:exit )?code -?\d+\.?|exit(?: code| status)?\s*[=:]?\s*-?\d+)$/i;
+const ERROR_LINE_RE =
+  /error|exception|fail|fatal|not found|denied|invalid|cannot|can't|unable|no such|refused|timed? ?out|失败|错误|报错|无法|找不到|拒绝|超时/i;
+
+/**
+ * The line that most likely says why a tool failed: the last error-looking
+ * line (a Python traceback ends with the exception), else the first
+ * informative one. The first line alone was often stdout noise.
+ */
+const errorReason = (text: string): string | undefined => {
+  const lines = nonEmptyLines(text)
+    .map((line) => line.trim())
+    .filter((line) => !UNINFORMATIVE_ERROR_LINE_RE.test(line));
+  return lines.findLast((line) => ERROR_LINE_RE.test(line)) ?? lines[0];
+};
 
 /** Path-like tokens (`src/a.ts`, `/repo/b.md`) used to match an error to its retry. */
 const pathTokens = (text: string): Set<string> => {
@@ -60,16 +60,13 @@ const pathTokens = (text: string): Set<string> => {
   return out;
 };
 
+/**
+ * Local D18: Outstanding Context lists only tool errors that no later call
+ * resolved. Prose (user or assistant sentences containing failure words) is
+ * not scanned: in sampled summaries those bullets were mostly clause
+ * fragments and already-settled discussion.
+ */
 const extractOutstandingContext = (blocks: NormalizedBlock[]): string[] => {
-  const pending: { index: number; text: string; subject?: string }[] = [];
-  const seen = new Set<string>();
-  const push = (index: number, text: string, subject?: string) => {
-    const key = text;
-    if (seen.has(key)) return;
-    seen.add(key);
-    pending.push({ index, text, subject });
-  };
-
   // An error retried successfully later in the window is resolved, not
   // outstanding. Bash errors extinguish only when the identical command
   // later succeeds — a different command succeeding says nothing about the
@@ -126,67 +123,17 @@ const extractOutstandingContext = (blocks: NormalizedBlock[]): string[] => {
       }
       return true;
     });
+
+  const outstanding: string[] = [];
   for (const e of errors) {
     if (isExtinguished(e)) continue;
-    push(e.index, `[${e.name}] ${firstLine(e.text, OUTSTANDING_CLIP)}`);
+    const reason = errorReason(e.text);
+    const command = e.name === "bash" && e.command ? `\`${firstLine(e.command, COMMAND_CLIP)}\` ` : "";
+    const line = `[${e.name}] ${command}${reason ? clip(reason, OUTSTANDING_CLIP) : "failed"}`;
+    if (!outstanding.includes(line)) outstanding.push(line);
   }
-
-  blocks.forEach((b, index) => {
-    if (b.kind === "tool_result" && b.isError) return;
-
-    if (b.kind === "assistant" || b.kind === "user") {
-      for (const line of nonEmptyLines(b.text)) {
-        // Preserve local Chinese resolution/negation scopes while retaining the
-        // upstream full-window tool retry and file attribution improvements.
-        if (/\p{Script=Han}/u.test(line)) {
-          if (/[?？]|^(?:是否|如果|假如|请|能否)|(?:吗|呢)[。！!]?$/u.test(line)) continue;
-          for (const raw of line.split(/[，,；;。]|\s+but\s+|但是|但(?=\p{Script=Han})/iu)) {
-            const clause = raw.trim().replace(/^(?:但是|但|然而|不过|but\s+)/iu, "");
-            const subject = clause.match(/^(.{1,40}?)(?:的错误|的故障|的)?(?:仍然?|依然|已经|已|不再|报错|失败|崩溃|无法|不能|未解决)/u)?.[1]?.trim();
-            const failure = /失败|报错|出错|崩溃|无法|不能|不工作|阻塞|卡住|未(?:修复|解决)|没修好/u;
-            const unresolved = /未(?:修复|解决)|(?:不是|并非|没有|尚未).*?(?:修复|解决)|\bnot (?:fixed|resolved)\b/iu;
-            const active = clause.replace(/不再(?:报错|失败|崩溃)/gu, "").replace(CJK_BENIGN_RE, "");
-            if (/(?:已经|已)(?:修复|解决|恢复)|不再(?:报错|失败|崩溃)/u.test(clause) && !unresolved.test(clause) && !failure.test(active) && !BLOCKER_RE.test(active)) {
-              if (subject) for (let i = pending.length - 1; i >= 0; i--) {
-                if (pending[i].subject === subject) {
-                  seen.delete(pending[i].text);
-                  pending.splice(i, 1);
-                }
-              }
-              continue;
-            }
-            if (!failure.test(active) && !BLOCKER_CJK_RE.test(active) && !BLOCKER_RE.test(active) && !unresolved.test(clause)) continue;
-            if (clause.length < 2 || /^\s*[-*+>(]/.test(clause)) continue;
-            push(index, `${b.kind === "user" ? "[user] " : ""}${clipSentence(clause, OUTSTANDING_CLIP)}`, subject);
-          }
-          continue;
-        }
-        // Benign-compound strip first: mechanism discussion must not flag.
-        const scannable = line.replace(CJK_BENIGN_RE, "");
-        if (!BLOCKER_RE.test(scannable) && !BLOCKER_CJK_RE.test(scannable)) continue;
-        // CJK conveys ~2-3x the information per char — 15 is an English floor.
-        // A short failure report (失败了) is complete at 3 chars.
-        const minLength = /[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(line) ? 2 : 15;
-        if (line.length < minLength) continue;
-        // Skip continuation fragments (sub-bullets, parentheticals, dangling clauses)
-        if (/^\s*[-*+>]\s/.test(line)) continue;
-        if (/^\s*\(/.test(line)) continue;
-        // Require sentence-like start: capital/quote, or any CJK character
-        if (!SENTENCE_START_RE.test(line)) continue;
-        const clipped =
-          b.kind === "user"
-            ? `[user] ${clipSentence(line, OUTSTANDING_CLIP)}`
-            : clipSentence(line, OUTSTANDING_CLIP);
-        const before = seen.size;
-        push(index, clipped);
-        if (seen.size > before) break;
-      }
-    }
-  });
-
-  // Chronological (errors and prose interleaved as they occurred), keep recent.
-  pending.sort((a, z) => a.index - z.index);
-  return pending.slice(-5).map((p) => p.text);
+  // Chronological; keep the most recent.
+  return outstanding.slice(-5);
 };
 
 const formatFileActivity = (input: BuildSectionsInput): string[] => {

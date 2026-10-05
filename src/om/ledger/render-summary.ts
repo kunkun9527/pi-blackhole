@@ -4,7 +4,7 @@
  * Upstream: https://github.com/elpapi42/pi-observational-memory (src/session-ledger/render-summary.ts)
  * Modified: separator-aware whole-record output caps.
  */
-import type { Observation, Reflection } from "./types.js";
+import { withoutReplacedReflections, type Observation, type Reflection } from "./types.js";
 import { estimateStringTokens } from "../tokens.js";
 
 const OM_INSTRUCTIONS_FULL = `Bracketed ids in reflections and observations connect to their source session entries. These are condensed memories from earlier in this session.
@@ -74,7 +74,8 @@ export function reflectionToSummaryLine(reflection: Reflection): string {
 }
 
 /** Bound compaction output only; worker reflection prompts stay unchanged. */
-export function selectPriorReflections(reflections: Reflection[], maxTokens: number): Reflection[] {
+export function selectPriorReflections(all: Reflection[], maxTokens: number): Reflection[] {
+  const reflections = withoutReplacedReflections(all);
   const selected: Reflection[] = [];
   let rendered = "";
   for (let i = reflections.length - 1; i >= 0; i--) {

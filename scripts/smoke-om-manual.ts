@@ -11,7 +11,7 @@ try {
   const {DEFAULTS}=await import('../src/core/unified-config');
   const {isObservationsRecordedData}=await import('../src/om/ledger/index');
   const {hashId}=await import('../src/om/ids');
-  const entries=Array.from({length:3},(_,i)=>({id:'s'+i,type:'message',message:{role:'user',content:'中文'.repeat(800),timestamp:0}}));
+  const entries=Array.from({length:3},(_,i)=>({id:'s'+i,type:'message',message:{role:'user',content:'中文'.repeat(760),timestamp:0}}));
   let cursor:any;const warnings:any[]=[];
   const runtime:any={config:{...DEFAULTS,compaction:'manual',observeAfterTokens:3000,observerChunkMaxTokens:8000},
     isGenerationActive:()=>true,tryEmitWorkerInfo:()=>{},getCursor:()=>cursor,advanceCursor:(_s:any,entryId:string,state:string)=>{cursor={entryId,state};},

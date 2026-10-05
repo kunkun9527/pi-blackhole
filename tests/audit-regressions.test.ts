@@ -49,11 +49,10 @@ test('latest language preference supersedes previous explicit language', () => {
   assert.ok(prefs.join('\n').includes('中文'));
   assert.ok(!prefs.join('\n').includes('英文'));
 });
-test('short Chinese blocker retained, resolved statement not treated as blocker', () => {
-  const sections = buildSections({blocks:[{kind:'user',text:'登录仍然报错。'}]});
-  assert.ok(sections.outstandingContext.join('\n').includes('报错'));
-  const resolved = buildSections({blocks:[{kind:'user',text:'登录模块的错误已经修复，现在运行正常。'}]});
-  assert.deepEqual(resolved.outstandingContext, []);
+test('user prose never becomes Outstanding Context (D18)', () => {
+  for (const text of ['登录仍然报错。', '登录模块的错误已经修复，现在运行正常。']) {
+    assert.deepEqual(buildSections({blocks:[{kind:'user',text}]}).outstandingContext, []);
+  }
 });
 test('Chinese tool arguments and thinking are not counted as ASCII', () => {
   for(const content of [[{type:'thinking',thinking:'中'.repeat(200)}], [{type:'toolCall',id:'a',name:'write',arguments:{content:'中'.repeat(200)}}]]) {

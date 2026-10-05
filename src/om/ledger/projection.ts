@@ -16,6 +16,7 @@ import {
   type MemoryDetails,
   type Observation,
   type Reflection,
+  withoutReplacedReflections,
 } from "./types.js";
 
 export type Projection = {
@@ -139,7 +140,7 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
 
   return {
     observations: observations.filter((observation) => !droppedObservationIds.has(observation.id)),
-    reflections,
+    reflections: withoutReplacedReflections(reflections),
   };
 }
 

@@ -14,6 +14,7 @@ import {
   type Entry,
   type Observation,
   type Reflection,
+  withoutReplacedReflections,
 } from "./types.js";
 import { debugLog } from "../debug-log.js";
 
@@ -106,7 +107,8 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
   const activeObservations = observations.filter(
     (observation) => !droppedObservationIds.has(observation.id),
   );
-  const reflections = Array.from(reflectionsById.values());
+  // Local D15: reflectionsById keeps replaced reflections for id lookups.
+  const reflections = withoutReplacedReflections(Array.from(reflectionsById.values()));
 
   return {
     observations,

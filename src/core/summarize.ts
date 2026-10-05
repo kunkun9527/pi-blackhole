@@ -5,13 +5,19 @@
  * Modified by pi-blackhole:
  * - threads touchMessages/cwd into buildSections for file-touch attribution
  *   (src/extract/file-touch.ts); merge logic otherwise unchanged.
+ * Local (docs/LOCAL-DIVERGENCE.md): Session Goal merge keeps the first message
+ * plus the newest goals (D16); Files And Changes drops paths that no longer
+ * exist on disk when the caller passes pathExists (D17).
  */
 import type { Message } from "@earendil-works/pi-ai";
 import type { FileOps } from "../types";
 import { normalize } from "./normalize";
 import { filterNoise } from "./filter-noise";
 import { buildSections } from "./build-sections";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { formatFileList } from "../extract/files";
+import { selectGoalLines } from "../extract/goals";
 import { formatSummary, capBrief, RECALL_NOTE, wrapLongLines } from "./format";
 import { redactSecrets } from "./redact-secrets";
 
@@ -35,6 +41,12 @@ export interface CompileInput {
    * renders as no ref (fail-closed). Omitted entirely → legacy positional.
    */
   sourceIndices?: Array<number | undefined>;
+  /**
+   * Local D17: existence check for an absolute path. When given, Files And
+   * Changes drops paths that no longer exist (deleted temp files, typos),
+   * including ones inherited from the previous summary.
+   */
+  pathExists?: (absolutePath: string) => boolean;
 }
 
 const HEADER_NAMES = [
@@ -147,15 +159,14 @@ const mergeHeaderSection = (header: string, prev: string, fresh: string): string
   const prevLines = prev.split("\n").filter(isClean);
   const freshLines = fresh.split("\n").filter(isClean);
   const combined = [...new Set([...prevLines, ...freshLines])];
-  const CAP = header === "Session Goal" ? 8 : header === "Commits" ? 8 : 15;
-  // Session Goal: keep first items so the original first message persists
+  // Session Goal: the session's first message plus the newest goals (local D16).
+  if (header === "Session Goal") {
+    const goals = selectGoalLines(combined.map((l) => l.slice(2))).map((l) => `- ${l}`);
+    return goals.length ? `[${header}]\n${goals.join("\n")}` : "";
+  }
   // Other sections: keep last items (fresh overrides stale)
-  const capped =
-    combined.length > CAP
-      ? header === "Session Goal"
-        ? combined.slice(0, CAP)
-        : combined.slice(-CAP)
-      : combined;
+  const CAP = header === "Commits" ? 8 : 15;
+  const capped = combined.length > CAP ? combined.slice(-CAP) : combined;
   if (capped.length === 0) return "";
   return `[${header}]\n${capped.join("\n")}`;
 };
@@ -231,7 +242,11 @@ const appendFragment = (fragment: string, next: string): string => {
   return fragment + next;
 };
 
-export const mergeFileLines = (prev: string, fresh: string): string => {
+export const mergeFileLines = (
+  prev: string,
+  fresh: string,
+  keep?: (path: string) => boolean,
+): string => {
   const categories = ["Modified", "Created", "Read"] as const;
   // stripped path → display string; prev inserted first, fresh display wins
   const merged: Record<string, Map<string, string>> = {};
@@ -311,6 +326,16 @@ export const mergeFileLines = (prev: string, fresh: string): string => {
   for (const key of merged.Modified.keys()) merged.Created.delete(key);
   // Also remove Read entries that also appear in Modified (same file read+edited)
   for (const key of merged.Modified.keys()) merged.Read.delete(key);
+  // Local D17: a dropped path also leaves the preserved total.
+  if (keep) {
+    for (const cat of categories) {
+      for (const key of [...merged[cat].keys()]) {
+        if (keep(key)) continue;
+        merged[cat].delete(key);
+        if (totals[cat]) totals[cat] -= 1;
+      }
+    }
+  }
 
   const preservedTotal = (cat: string): number => Math.max(totals[cat] ?? 0, merged[cat].size);
 
@@ -332,6 +357,31 @@ export const mergeFileLines = (prev: string, fresh: string): string => {
   }
   if (lines.length === 0) return "";
   return `[Files And Changes]\n${lines.join("\n")}`;
+};
+
+const FILES_HEADER = "[Files And Changes]";
+
+/** Local D17: re-render Files And Changes without paths that `exists` rejects. */
+const dropMissingFiles = (
+  text: string,
+  cwd: string | undefined,
+  exists: (absolutePath: string) => boolean,
+): string => {
+  const body = extractSection(text, "Files And Changes");
+  const block = `${FILES_HEADER}\n${body}`;
+  if (!body || !text.includes(block)) return text;
+  const keep = (path: string): boolean => {
+    const expanded = path.replace(/^~(?=[/\\])/, homedir());
+    return exists(resolve(cwd ?? process.cwd(), expanded));
+  };
+  const filtered = mergeFileLines("", body, keep);
+  // Function replacements: paths may contain `$`, which string replacements expand.
+  if (filtered) return text.replace(block, () => filtered);
+  // Nothing left: drop the section together with one adjoining blank line.
+  for (const gap of [`${block}\n\n`, `\n\n${block}`, block]) {
+    if (text.includes(gap)) return text.replace(gap, () => "");
+  }
+  return text;
 };
 
 const mergeBriefTranscript = (prev: string, fresh: string): string => {
@@ -391,10 +441,11 @@ const compileFresh = (
 export const compileSegment = (
   input: Pick<
     CompileInput,
-    "messages" | "fileOps" | "sourceIndices" | "touchMessages" | "cwd" | "gitTags"
+    "messages" | "fileOps" | "sourceIndices" | "touchMessages" | "cwd" | "gitTags" | "pathExists"
   >,
 ): string => {
-  const fresh = compileFresh(input);
+  const compiled = compileFresh(input);
+  const fresh = compiled && input.pathExists ? dropMissingFiles(compiled, input.cwd, input.pathExists) : compiled;
   return fresh ? wrapLongLines(redactSecrets(fresh)) : "";
 };
 
@@ -408,7 +459,9 @@ export const compile = (input: CompileInput): string => {
   // stripper with fragments.
   let prev = input.previousSummary ? stripOMContent(input.previousSummary) : undefined;
   prev = prev ? stripRecallNotes(prev) : undefined;
-  const merged = prev ? mergePrevious(prev, fresh) : fresh;
+  const combined = prev ? mergePrevious(prev, fresh) : fresh;
+  const merged =
+    combined && input.pathExists ? dropMissingFiles(combined, input.cwd, input.pathExists) : combined;
   if (!merged) return "";
   // Defensive: remove any recall notes that survived the above (e.g. nested
   // inside the brief transcript after a prior merge).

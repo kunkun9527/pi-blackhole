@@ -21,15 +21,9 @@ test('language changes retain unrelated compound constraints', () => {
     assert.ok(!out.some(s=>s.includes('中文回复')));
   }
 });
-test('Chinese and English mixed status retains active failures', () => {
-  for (const text of ['登录模块已经修复，但注册模块报错。','Login was fixed, but registration failed.']) {
-    const out=buildSections({blocks:users(text)}).outstandingContext;
-    assert.ok(out.some(s=>s.includes('注册模块报错')||s.includes('registration failed')));
-  }
-});
-test('English blocker recognition is backwards compatible', () => {
-  for (const text of ['The login module does not work.',"The login module doesn't work.","The login module won't work.",'The login result is still wrong.']) {
-    assert.ok(buildSections({blocks:users(text)}).outstandingContext.length>0,text);
+test('prose status in either language is not Outstanding Context (D18)', () => {
+  for (const text of ['登录模块已经修复，但注册模块报错。','Login was fixed, but registration failed.','The login module does not work.']) {
+    assert.deepEqual(buildSections({blocks:users(text)}).outstandingContext, [], text);
   }
 });
 test('short Chinese tasks update goals while completion reports do not', () => {

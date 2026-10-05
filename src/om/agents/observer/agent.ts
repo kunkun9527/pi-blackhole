@@ -24,6 +24,7 @@ import type { Static } from "typebox";
 import { hashId } from "../../ids.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { OBSERVER_SYSTEM } from "./prompts.js";
+import { withMemoryLanguage, type MemoryLanguage } from "../../memory-language.js";
 import { redactSecrets } from "../../../core/redact-secrets.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../ledger/index.js";
@@ -45,6 +46,8 @@ interface RunObserverArgs extends InputBudgetOptions {
   priorReflections: string[];
   priorObservations: string[];
   chunk: string;
+  /** Local D14: language every observation must be written in. */
+  memoryLanguage?: MemoryLanguage;
   allowedSourceEntryIds: string[];
   /** Entry id -> local display timestamp for the chunk's source entries; used to
    *  timestamp observations programmatically from their cited evidence. */
@@ -130,13 +133,14 @@ function observerText(chunk: string, reflections: readonly string[], observation
   return redactSecrets(`CURRENT REFLECTIONS:\n${reflections.join('\n') || '(none yet)'}\n\nCURRENT OBSERVATIONS:\n${observations.join('\n') || '(none yet)'}\n\nCompress the following new conversation chunk into observations by calling record_observations one or more times. Use complete=false for partial batches or corrections, and use complete=true only on the final valid batch after the chunk is fully covered. If no observations are warranted, close the run with one record_observations call carrying an empty observations array and complete=true. Do not restate facts already present in current reflections or current observations.\n\nNEW CONVERSATION CHUNK:\n${chunk}`);
 }
 /** Choose an oldest-first contiguous prefix using the exact initial prompt layout. */
-export function prepareObserverInput(entries: RenderableEntry[], model: any, options: InputBudgetOptions, reflections: string[], observations: string[]) {
+export function prepareObserverInput(entries: RenderableEntry[], model: any, options: InputBudgetOptions, reflections: string[], observations: string[], memoryLanguage?: MemoryLanguage) {
+  const system = withMemoryLanguage(OBSERVER_SYSTEM, memoryLanguage);
   const limit = agentInputLimit(model, options, 40_000);
   const contextCap = Math.floor(limit * 0.1);
   const priorReflections = [boundedContext(reflections, contextCap)].filter(Boolean);
   const priorObservations = [boundedContext(observations, contextCap)].filter(Boolean);
   const tools = [{name:'record_observations',description:OBSERVER_TOOL_DESCRIPTION,parameters:RecordObservationsSchema}];
-  const fits = (count: number) => agentInputTokens(OBSERVER_SYSTEM, tools, userPrompt(observerText(serializeSourceAddressedBranchEntries(entries.slice(0,count)).text, priorReflections, priorObservations))) <= initialInputLimit(limit);
+  const fits = (count: number) => agentInputTokens(system, tools, userPrompt(observerText(serializeSourceAddressedBranchEntries(entries.slice(0,count)).text, priorReflections, priorObservations))) <= initialInputLimit(limit);
   if (entries.length && !fits(1)) {
     // Source coverage takes priority over optional prior context.
     priorReflections.splice(0, priorReflections.length, '(prior context omitted)');
@@ -341,7 +345,8 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
 
   const limit = agentInputLimit(model, args, 40_000);
   const userText = observerText(conversation, priorReflections, priorObservations);
-  if (agentInputTokens(OBSERVER_SYSTEM, [recordObservations], userPrompt(userText)) > limit) {
+  const system = withMemoryLanguage(OBSERVER_SYSTEM, args.memoryLanguage);
+  if (agentInputTokens(system, [recordObservations], userPrompt(userText)) > limit) {
     throw new InputBudgetError(`Observer input exceeds budget ${limit}; original retained and coverage not advanced.`);
   }
 
@@ -353,7 +358,7 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
     },
   ];
 
-  const context = buildAgentContext(OBSERVER_SYSTEM, [recordObservations as AgentTool<any>]);
+  const context = buildAgentContext(system, [recordObservations as AgentTool<any>]);
 
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";

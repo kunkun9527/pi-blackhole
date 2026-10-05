@@ -27,6 +27,7 @@ import { hashId } from "../../ids.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { truncateRecordContent } from "../../serialize.js";
 import { REFLECTOR_SYSTEM } from "./prompts.js";
+import { withMemoryLanguage, type MemoryLanguage } from "../../memory-language.js";
 import { redactSecrets } from "../../../core/redact-secrets.js";
 import { estimateStringTokens } from "../../tokens.js";
 import { agentCompletionError, initialInputLimit } from '../../input-budget.js';
@@ -55,6 +56,13 @@ interface RunReflectorArgs extends InputBudgetOptions {
   existingReflectionsSummary?: string;
   /** Compact summary of existing observations for context (not to re-process). */
   existingObservationsSummary?: string;
+  /**
+   * Local D15: active reflections a new reflection may replace. Replacing is
+   * the only way a stale or duplicated reflection leaves compacted memory.
+   */
+  replaceableReflections?: Reflection[];
+  /** Local D14: language every reflection must be written in. */
+  memoryLanguage?: MemoryLanguage;
   signal?: AbortSignal;
   agentLoop?: typeof agentLoop;
   /** Optional custom stream function bypassing agentLoop's default streamSimple.
@@ -86,9 +94,15 @@ const RecordReflectionsSchema = Type.Object({
   reflections: Type.Array(
     Type.Object({
       content: Type.String({ minLength: 1 }),
-      supportingObservationIds: Type.Array(Type.String({ minLength: 1 }), {
-        minItems: 1,
-      }),
+      // Local D15: may be empty only when replacesReflectionIds is not;
+      // the replacement then inherits the replaced reflections' support.
+      supportingObservationIds: Type.Array(Type.String({ minLength: 1 })),
+      replacesReflectionIds: Type.Optional(
+        Type.Array(Type.String({ minLength: 1 }), {
+          description:
+            "Ids of existing reflections this reflection supersedes, corrects, or merges (including the same fact written in another language). Replaced reflections leave compacted memory.",
+        }),
+      ),
     }),
     { minItems: 1 },
   ),
@@ -107,6 +121,14 @@ type RecordReflectionsArgs = Static<typeof RecordReflectionsSchema>;
 
 function joinOrEmpty(items: string[]): string {
   return items.length ? items.join("\n") : "(none yet)";
+}
+
+/** Local D15: keep only known replaceable ids, deduplicated, in proposal order. */
+export function normalizeReplacedReflectionIds(
+  ids: readonly string[] | undefined,
+  replaceable: ReadonlyMap<string, Reflection>,
+): string[] {
+  return [...new Set((ids ?? []).filter((id) => replaceable.has(id)))];
 }
 
 export function normalizeSupportingObservationIds(
@@ -150,6 +172,10 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
 
   const allowedObservationIds = observations.map((observation) => observation.id);
   const existingReflectionIds = new Set(reflections.map((reflection) => reflection.id));
+  const replaceable = new Map<string, Reflection>();
+  for (const reflection of [...(args.replaceableReflections ?? []), ...reflections]) {
+    replaceable.set(reflection.id, reflection);
+  }
   const accumulated = new Map<string, Reflection>();
   // Cumulative counts for this run, including reflections the model corrected
   // or re-proposed in a later batch. Reported so the model can reconcile what
@@ -186,15 +212,31 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
       let rejected = 0;
       for (const proposal of params.reflections) {
         const content = normalizeReflectionContent(proposal.content);
-        const supportingObservationIds = normalizeSupportingObservationIds(
+        const cited = normalizeSupportingObservationIds(
           proposal.supportingObservationIds,
           allowedObservationIds,
         );
-        if (!content || !supportingObservationIds) {
+        const replacesReflectionIds = normalizeReplacedReflectionIds(
+          proposal.replacesReflectionIds,
+          replaceable,
+        );
+        // Cited ids stay strict: any unknown id rejects the proposal.
+        const citedInvalid = proposal.supportingObservationIds.length > 0 && !cited;
+        const supportingObservationIds = [
+          ...new Set([
+            ...(cited ?? []),
+            ...replacesReflectionIds.flatMap((id) => replaceable.get(id)!.supportingObservationIds),
+          ]),
+        ];
+        if (!content || citedInvalid || supportingObservationIds.length === 0) {
           rejected++;
           continue;
         }
-        const id = hashId(content);
+        // Local D15: a replacement hashes its replaced ids too, so restoring
+        // an earlier wording (A -> B -> A) gets a new id instead of colliding
+        // with the replaced original, which the fold would keep instead.
+        const id = hashId(replacesReflectionIds.length ? `${content}
+${replacesReflectionIds.join(",")}` : content);
         if (existingReflectionIds.has(id) || accumulated.has(id)) {
           duplicates++;
           continue;
@@ -203,6 +245,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
           id,
           content,
           supportingObservationIds,
+          ...(replacesReflectionIds.length ? { replacesReflectionIds } : {}),
           tokenCount: estimateStringTokens(content),
         });
         added++;
@@ -214,7 +257,9 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
       if (terminates) closedByCompleteBatch = true;
       else if (added > 0 || rejected > 0) closedByCompleteBatch = false;
       const rejectionReason =
-        rejected > 0 ? " (invalid content or unknown supporting observation ids)" : "";
+        rejected > 0
+          ? " (invalid content, unknown supporting observation ids, or neither supporting observation ids nor replaced reflection ids)"
+          : "";
       const refusal =
         params.complete === true && rejected > 0
           ? ` complete=true was not honored: ${rejected} reflection${rejected === 1 ? "" : "s"} in this batch still ${rejected === 1 ? "needs" : "need"} correcting — re-submit them with supportingObservationIds copied from the observation lines; anything not re-submitted is discarded and will not be recorded.`
@@ -263,8 +308,9 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
   const contextCap = Math.floor(limit * 0.1);
   const priorReflections = boundedContext([...(args.existingReflectionsSummary?.split('\n') ?? []), ...reflections.map(reflectionToSummaryLine)], contextCap);
   const priorObservations = boundedContext(args.existingObservationsSummary?.split('\n') ?? [], contextCap);
-  const render = (items: Observation[]) => redactSecrets(`EXISTING REFLECTIONS (context only):\n${priorReflections}\n\nEXISTING OBSERVATIONS (context only):\n${priorObservations}\n\nNEW OBSERVATIONS TO PROCESS:\n${joinOrEmpty(items.map(observationToSummaryLine))}\n\nCrystallize any missing durable facts or patterns into new reflections. Use complete=false for a partial batch or a correction, and use complete=true only on the final valid batch once every active observation has been reviewed. If nothing is stable enough, do not call the tool.`);
-  const batches = planInputBatches(observations, items => agentInputTokens(REFLECTOR_SYSTEM, [recordReflections], userPrompt(render(items))) <= initialInputLimit(limit), 'Reflector');
+  const render = (items: Observation[]) => redactSecrets(`EXISTING REFLECTIONS (replace stale or duplicated ones via replacesReflectionIds):\n${priorReflections}\n\nEXISTING OBSERVATIONS (context only):\n${priorObservations}\n\nNEW OBSERVATIONS TO PROCESS:\n${joinOrEmpty(items.map(observationToSummaryLine))}\n\nCrystallize any missing durable facts or patterns into new reflections, and replace existing reflections that are stale or duplicated (use replacesReflectionIds). Use complete=false for a partial batch or a correction, and use complete=true only on the final valid batch once every active observation has been reviewed. If nothing is stable enough, do not call the tool.`);
+  const system = withMemoryLanguage(REFLECTOR_SYSTEM, args.memoryLanguage);
+  const batches = planInputBatches(observations, items => agentInputTokens(system, [recordReflections], userPrompt(render(items))) <= initialInputLimit(limit), 'Reflector');
   if (batches.length > 1) {
     const results = new Map<string, Reflection>();
     let errorAfterClose: string | undefined;
@@ -274,7 +320,8 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
       errorAfterClose ??= result.errorAfterClose;
       for (const ref of result.reflections ?? []) {
         const previous = results.get(ref.id);
-        results.set(ref.id, previous ? {...ref, supportingObservationIds:[...new Set([...previous.supportingObservationIds, ...ref.supportingObservationIds])]} : ref);
+        const replaced = [...new Set([...(previous?.replacesReflectionIds ?? []), ...(ref.replacesReflectionIds ?? [])])];
+        results.set(ref.id, previous ? {...ref, supportingObservationIds:[...new Set([...previous.supportingObservationIds, ...ref.supportingObservationIds])], ...(replaced.length ? {replacesReflectionIds: replaced} : {})} : ref);
       }
     }
     return {
@@ -290,7 +337,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
       timestamp: Date.now(),
     },
   ];
-  const context = buildAgentContext(REFLECTOR_SYSTEM, [recordReflections as AgentTool<any>]);
+  const context = buildAgentContext(system, [recordReflections as AgentTool<any>]);
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;

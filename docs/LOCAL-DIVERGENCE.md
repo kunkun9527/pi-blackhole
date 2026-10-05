@@ -3,8 +3,8 @@
 本文件是本地版 `pi-blackhole-local` 与上游 `k0valik/pi-blackhole` 所有行为差异的单一事实来源。以下三种情况必须先读本文件：解决合并冲突、修改下表涉及的文件、判断某个上游测试失败是不是预期。
 
 - 对照基线：上游 `v0.5.10`（`be64de8`）。对比命令：`git diff be64de8 main -- src index.ts ':!*.test.ts'`（整合树 `M:/pi-blackhole-integration`）。
-- 差异规模：28 个源码文件，+1050 / −878 行，新增文件 `src/om/input-budget.ts`、`src/core/redact-secrets.ts`。
-- 上游全量 vitest 在该基线下 2431 / 2456 通过，25 项失败全部是下文登记的「上游预期失败」（D2 20 项、D4 3 项、D5 1 项、D12 环境 1 项）。
+- 差异规模：33 个源码文件，约 +1370 / −970 行，新增文件 `src/om/input-budget.ts`、`src/core/redact-secrets.ts`、`src/om/memory-language.ts`。
+- 上游全量 vitest 在该基线下 2419 / 2456 通过，37 项失败全部是下文登记的「上游预期失败」（D2 20 项、D4 3 项、D5 1 项、D12 环境 1 项、D16 2 项、D18 10 项）。`TEMP` 位于用户目录下时，`config-manager.test.ts`「getExtensionsDir() returns a temp path in vitest without PI_CODING_AGENT_DIR」也会失败（断言临时目录不在 home 内）；用 `TEMP=M:/Temp TMP=M:/Temp` 运行即可排除，与本地代码无关。
 - 同步、验收、部署流程见根目录 `LOCAL-MAINTENANCE.md`。
 
 ## 总览
@@ -16,7 +16,7 @@
 | D3 | observer 旧→新连续覆盖，排空积压 | 记忆完整性，全语言 | observer 阶段 |
 | D4 | 完成判定严格化，不提交部分结果 | 记忆完整性，全语言 | 三个后台 worker |
 | D5 | worker 输入预算与分批 | 记忆完整性，全语言 | 三个后台 worker 的提示词和请求 |
-| D6 | 偏好、目标、阻塞项的中文提取 | 中文，含英文行为变化 | 压缩摘要各节 |
+| D6 | 偏好、目标的中文提取 | 中文，含英文行为变化 | 压缩摘要各节 |
 | D7 | 检索中文分词；导出只按原文精确去重 | 中文，全语言 | recall 排序、`/blackhole-export` |
 | D8 | recall 字符与 token 双上限 | 本地增强 | recall 工具所有输出 |
 | D9 | RPC 模式简短摘要与完整摘要恢复 | 本地增强 | RPC 模式压缩 |
@@ -24,6 +24,11 @@
 | ~~D11~~ | 状态栏无 UI 时停用（0.5.9 起已回归上游） | — | — |
 | D12 | 打包与工程 | 工程 | 入口、依赖、测试 |
 | D13 | 凭据脱敏 | 安全，全语言 | 压缩摘要、三个后台 worker 的输入与记忆输出 |
+| D14 | 记忆语言跟随用户消息 | 中文 | observer、reflector 的提示词 |
+| D15 | 反思显式替换旧条目 | 记忆质量，全语言 | reflector 输出、账本折叠与压缩注入 |
+| D16 | Session Goal 保留开头并更新到最新 | 摘要质量，全语言 | `[Session Goal]` |
+| D17 | Files And Changes 过滤已不存在的路径 | 摘要质量，全语言 | `[Files And Changes]` |
+| D18 | Outstanding Context 只列未解决的工具错误 | 摘要质量，全语言 | `[Outstanding Context]` |
 
 ---
 
@@ -141,7 +146,7 @@
 
 **合并注意**：上游改三个 agent 文件时，保留本地的 `limit / render / planInputBatches / budgetedStream / agentCompletionError` 骨架；上游在 0.5.7/0.5.8 引入的 `buildAgentContext`、`createTurnCap` 已采用，不要再换回本地旧实现（见文末「已回归上游」）。
 
-## D6 偏好、目标、阻塞项的中文提取
+## D6 偏好、目标的中文提取
 
 **`src/extract/preferences.ts`（整体重写，英文行为也有变化）**：
 - 识别：`ENGLISH_PREFERENCE`、`CHINESE_PREFERENCE`（始终/不要/禁止/希望/改用…开头）、`CORRECTION`（英文 stop/revert/undo/that's wrong，中文 不要/不用/别再/回退/停止/以后/下次/必须/记住，仅限句首）。
@@ -153,11 +158,11 @@
 
 **`src/extract/goals.ts`**：范围变更与任务动词加入中文（改成/换成/接下来/新任务、修复/实现/重构…）；中文目标最短 4 字（英文 6）；「修复已完成」「请不要改」、问句、条件句不算新目标；中文任务行不要求长度 > 15。
 
-**`src/core/build-sections.ts`（未解决问题）**：含汉字的行按 `，；。`、但是/但/but 分句；问句跳过；每个分句提取主语，「X 已修复 / 不再报错」只清除同一主语的待办，不遮住别的分句仍在失败的问题；否定修复（未解决、不是…修复）仍算未解决。去重键改为原文（上游小写）。英文沿用上游规则。
-
 **测试**：`tests/chinese-support.test.ts`、`tests/second-review.test.ts`、`tests/audit-regressions.test.ts`、`tests/integration.test.ts`。
 
-**合并注意**：上游改这三个文件时逐条对照上面规则；上游新增的英文模式可以并入 `ENGLISH_PREFERENCE` / `CORRECTION`。
+原先这里的中文阻塞项扫描已被 D18 取代。目标条数的选择见 D16。
+
+**合并注意**：上游改这两个文件时逐条对照上面规则；上游新增的英文模式可以并入 `ENGLISH_PREFERENCE` / `CORRECTION`。
 
 ## D7 检索中文分词；导出只按原文精确去重
 
@@ -229,6 +234,53 @@
 - 测试：`tests/redact-secrets.test.ts`。
 - 与上游 PR k0valik/pi-blackhole#146 的关系：PR 是不含中文规则的同一套检测器；2026-10-05 按 PR 机器人审查修过的 URL 密码、base64 `/`、跨行标签和 append tail 已同步回本地。PR 把记忆脱敏放在 ledger 的行格式化函数里（避开 #143 改动的 worker 文件），本地仍在 worker 完整输入处脱敏，覆盖范围不小于 PR。
 
+## D14 记忆语言跟随用户消息
+
+上游 observer/reflector 没有语言约束，中文会话里常把同一事实中英文各记一遍，反思池里的重复约占四成。
+
+- `src/om/memory-language.ts` `detectMemoryLanguage()`：看最近 40 条用户消息，去掉 `<skill>` 块和代码围栏后逐条判定：含 ≥2 个汉字算中文，否则含 ≥10 个拉丁字母算英文；中文票数不少于英文时选中文。`withMemoryLanguage()` 在 system prompt 末尾加一句：内容用简体中文写，路径、命令、标识符、配置键、报错和引用原话保留原文，不要用中文重述已用英文记录的事实。
+- 接入：`consolidation.ts` 按当前分支计算语言后传给 `runObserver` / `runReflector`。非中文会话不加任何提示，行为同上游。
+- 已写入的英文记忆不改写，由 D15 的替换逐步收敛。
+- 测试：`tests/memory-quality.test.ts`；`tests/om-input-budget.test.ts` 两个中文预算夹具从 800 次重复降到 760，给新增提示留出空间。
+
+## D15 反思显式替换旧条目
+
+上游反思只增不改，状态更新后「计划做」「未完成」「已部署」多条版本并存，旧的还会和新的矛盾。
+
+- `record_reflections` 每条新反思可带 `replacesReflectionIds`（`ledger/types.ts`）。带替换的反思 ID 由内容加被替换 ID 一起哈希，因此把状态改回旧措辞（A→B→A）会得到新 ID，不会撞上已被替换的旧 A。reflector（`agents/reflector/agent.ts`）只保留当前活动反思里存在的 id、去重；替换项自动继承被替换反思的 `supportingObservationIds`，因此 `supportingObservationIds` 在有替换时可以为空。
+- `ledger/types.ts` `withoutReplacedReflections()`：被替换的反思从 `foldLedger().reflections`、压缩注入和渲染中移除；`reflectionsById` 仍保留，原始账本条目不删，`recall` 可查。
+- `reflector/prompts.ts`：要求先检查已有反思，对过时、被纠正或跨语言重复的条目写一条合并后的新反思并声明替换，不要再追加一条相近的。
+- 测试：`tests/memory-quality.test.ts`。
+
+## D16 Session Goal 保留开头并更新到最新
+
+上游合并旧摘要时保留**最早**的 8 条目标，几次压缩后目标冻结在会话开头，后来的范围变化挤不进去；同时旧的 `[Scope change]` 会一直留着。
+
+- `src/extract/goals.ts` `selectGoalLines()`：按 `(#N)` 后缀把行分组到消息，保留第一条消息最多 4 行，其余名额从最新消息往前取（每条最多 3 行），总数不超过 8；只留最新的 `[Scope change]` 标记。`extractGoals()` 和 `summarize.ts` 的 Session Goal 合并都用它。
+- 局限：后续压缩窗口的「第一条消息」来自上一份摘要已有的首组目标；如果上一份摘要已丢失真正的开头，这里无法恢复。
+- 测试：`tests/memory-quality.test.ts`。
+
+**上游预期失败**（2 项）：`vcc-extract-goals.test.ts`「takes up to 6 lines from first user block」（首条消息本地只留 4 行）、`vcc-summarize-robust.test.ts`「caps Session Goal at 8 items, preserving first goals at top」（本地按首条 + 最新选取）。
+
+## D17 Files And Changes 过滤已不存在的路径
+
+上游会一直列出已删除的临时文件，旧摘要里的路径也会无限继承。
+
+- `CompileInput.pathExists`（`core/summarize.ts`）：传入后，`compile()` 在合并旧摘要之后、`compileSegment()` 在生成之后，把 Files And Changes 里按 `cwd` 解析（展开 `~/`）后不存在的路径删掉，计数同步减少；删空则整节去掉。`hooks/before-compact.ts` 传 `existsSync`。不传时行为同上游。
+- 局限：`compactionSummaryMode: "append"` 下已冻结的旧段由 `compaction-chain.ts` 原样投影，不做过滤（改写旧段会破坏 append 模式要保住的 prompt cache 前缀）；只有新段和备用完整摘要会过滤。
+- `mergeFileLines()` 新增可选 `keep` 参数实现过滤；文本替换用函数形式，避免路径里的 `$` 被当作替换模式。
+- 测试：`tests/memory-quality.test.ts`。
+
+## D18 Outstanding Context 只列未解决的工具错误
+
+抽样近期压缩摘要的 Outstanding Context，从用户或助手散文里扫出来的条目大多是句子碎片或已解决的讨论，工具错误条目也常常只有 `(no output)`、退出码或 `Traceback` 开头。
+
+- `src/core/build-sections.ts` `extractOutstandingContext()`：不再扫描散文（上游英文规则和原 D6 的中文分句规则都删除）。只保留之后没有被成功调用消解的工具错误；消解规则沿用上游（bash 要求同一命令后来成功，其他工具按路径匹配）。
+- 每条写成 `[工具] \`命令\` 原因`：原因取最后一条像错误的行（Python traceback 以异常收尾），跳过 `(no output)`、`Traceback …`、`exit code N` 这类没信息的行；命令截到 80 字，原因截到 200 字。去重后保留最近 5 条。
+- 测试：`tests/memory-quality.test.ts`；`tests/audit-regressions.test.ts`、`tests/chinese-support.test.ts`、`tests/integration.test.ts`、`tests/second-review.test.ts` 中原先断言散文阻塞项的用例改为断言不再产生。
+
+**上游预期失败**（10 项，都断言从散文提取阻塞项）：`vcc-build-sections.test.ts`「captures outstanding context from user and assistant text」；`vcc-outstanding-context.test.ts` 的 window 组 3 项（early blocker、most recent 5、dedup latest wording）、CJK blockers 组 3 项、CJK precision 组 3 项（real stem beside benign compounds、short CJK failure reports、bracket-led headings）。
+
 ---
 
 ## 文件 → 差异索引（解决冲突用）
@@ -237,22 +289,27 @@
 |---|---|
 | `index.ts` | D10 |
 | `src/commands/memory.ts` | D2 |
-| `src/core/build-sections.ts` | D6 |
-| `src/core/redact-secrets.ts`（本地新增）、`src/core/summarize.ts` | D13 |
+| `src/core/build-sections.ts` | D18 |
+| `src/core/redact-secrets.ts`（本地新增） | D13 |
+| `src/core/summarize.ts` | D13、D16、D17 |
 | `src/core/compaction-chain.ts` | D12、D13 |
 | `src/core/config-env.ts`、`src/core/unified-config.ts`、`example-config.json` | D8 |
 | `src/core/format-recall.ts`、`src/core/recall-budget.ts`、`src/tools/recall.ts` | D8 |
 | `src/details.ts`、`src/hooks/compaction-context.ts` | D9 |
-| `src/hooks/before-compact.ts` | D9、D12、D13 |
-| `src/extract/goals.ts`、`src/extract/preferences.ts` | D6 |
+| `src/hooks/before-compact.ts` | D9、D12、D13、D17 |
+| `src/extract/goals.ts` | D6、D16 |
+| `src/extract/preferences.ts` | D6 |
 | `src/om/tokens.ts` | D1 |
 | `src/om/input-budget.ts`（本地新增） | D3、D4、D5 |
-| `src/om/consolidation.ts` | D2、D3、D5 |
-| `src/om/agents/observer/agent.ts` | D3、D4、D5、D13 |
+| `src/om/consolidation.ts` | D2、D3、D5、D14 |
+| `src/om/memory-language.ts`（本地新增） | D14 |
+| `src/om/agents/observer/agent.ts` | D3、D4、D5、D13、D14 |
 | `src/om/agents/observer/prompts.ts` | D13 |
-| `src/om/agents/reflector/agent.ts` | D4、D5、D13 |
+| `src/om/agents/reflector/agent.ts` | D4、D5、D13、D14、D15 |
+| `src/om/agents/reflector/prompts.ts` | D15 |
+| `src/om/ledger/types.ts`、`src/om/ledger/fold.ts`、`src/om/ledger/render-summary.ts` | D15 |
 | `src/om/agents/dropper/agent.ts` | D2、D4、D5、D13 |
-| `src/om/agents/dropper/coverage.ts`、`src/om/ledger/projection.ts`、`src/om/ledger/progress.ts` | D2（progress 另含 D5 的 `boundedContext`） |
+| `src/om/agents/dropper/coverage.ts`、`src/om/ledger/projection.ts`、`src/om/ledger/progress.ts` | D2（progress 另含 D5 的 `boundedContext`，projection 另含 D15） |
 | `src/project-recall/dedup.ts`、`src/project-recall/format-export.ts` | D7 |
 
 不在表内的 `src/` 文件应与上游完全一致；出现差异即为未记录的漂移，先查明来源再合并。

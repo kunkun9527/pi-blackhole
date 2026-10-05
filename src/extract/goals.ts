@@ -95,5 +95,52 @@ export const extractGoals = (blocks: NormalizedBlock[]): string[] => {
     }
   }
 
-  return goals.slice(0, 8);
+  return selectGoalLines(goals);
+};
+
+const SCOPE_MARKER_RE = /^\[Scope change\]/;
+const goalSource = (line: string): string => line.match(/\(#\d+\)$/)?.[0] ?? "";
+
+export const MAX_GOAL_LINES = 8;
+const MAX_INITIAL_GOAL_LINES = 4;
+const MAX_LATER_GOAL_LINES = 3;
+
+/**
+ * Local D16: pick at most eight goal lines from a chronological list: the
+ * session's first message (up to four lines) plus the newest later user
+ * messages (up to three lines each), newest first until the cap. Lines from
+ * one message share a `(#N)` suffix; a `[Scope change]` marker starts a new
+ * message. Only the newest marker survives, older markers would make a
+ * superseded direction look current. Keeping the first eight lines instead
+ * froze the goal on whatever the first compactions saw.
+ */
+export const selectGoalLines = (lines: readonly string[]): string[] => {
+  const groups: string[][] = [];
+  for (const line of lines) {
+    const last = groups.at(-1);
+    const sameMessage =
+      last && !SCOPE_MARKER_RE.test(line) && goalSource(line) === goalSource(last[last.length - 1]!);
+    if (sameMessage) last.push(line);
+    else groups.push([line]);
+  }
+  if (groups.length === 0) return [];
+  const lastMarker = lines.findLast((line) => SCOPE_MARKER_RE.test(line));
+  const content = (group: string[]): string[] =>
+    group.filter((line) => !SCOPE_MARKER_RE.test(line) || line === lastMarker);
+
+  const [initial, ...later] = groups;
+  const selected: string[][] = [content(initial!).slice(0, MAX_INITIAL_GOAL_LINES)];
+  let room = MAX_GOAL_LINES - selected[0]!.length;
+  const recent: string[][] = [];
+  for (let i = later.length - 1; i >= 0 && room > 0; i--) {
+    const lines = content(later[i]!);
+    const marker = lines.filter((line) => SCOPE_MARKER_RE.test(line));
+    const body = lines.filter((line) => !SCOPE_MARKER_RE.test(line)).slice(0, MAX_LATER_GOAL_LINES);
+    // A marker without any of its lines says nothing.
+    const picked = body.length ? [...marker, ...body].slice(0, room) : [];
+    if (picked.length === 0 || picked.every((line) => SCOPE_MARKER_RE.test(line))) continue;
+    recent.unshift(picked);
+    room -= picked.length;
+  }
+  return [...selected, ...recent].flat();
 };

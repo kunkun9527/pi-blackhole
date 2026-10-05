@@ -68,10 +68,12 @@ import {
   reflectionsCreatedAfterIndex,
   selectPriorObservations,
   selectPriorReflections,
+  withoutReplacedReflections,
   type Entry,
   type Observation,
   type Reflection,
 } from "./ledger/index.js";
+import { detectMemoryLanguage } from "./memory-language.js";
 
 export type ResolvedModel = Extract<ResolveResult, { ok: true }>;
 
@@ -906,9 +908,10 @@ export async function runObserverStage(
     const effectiveObsCtx = effectiveContextWindow(resolved.model as any, stageModelForThinking);
 
     try {
+      const memoryLanguage = detectMemoryLanguage(entries);
       const { runObserver, prepareObserverInput } = await import("./agents/observer/agent.js");
       const budget = {inputMaxTokens: maxChunkTokens, contextWindow: effectiveObsCtx};
-      const prepared = prepareObserverInput(chunkEntries, resolved.model, budget, priorReflections, priorObservations);
+      const prepared = prepareObserverInput(chunkEntries, resolved.model, budget, priorReflections, priorObservations, memoryLanguage);
       const coversUpToId = prepared.sourceEntryIds.at(-1);
       if (!coversUpToId) return "continue";
       debugLog('observer.start', {coversUpToId, sourceEntryIds:prepared.sourceEntryIds, sourceEntryCount:prepared.sourceEntryIds.length});
@@ -929,6 +932,7 @@ export async function runObserverStage(
             priorReflections: prepared.priorReflections,
             priorObservations: prepared.priorObservations,
             chunk: prepared.text,
+            memoryLanguage,
             allowedSourceEntryIds: prepared.sourceEntryIds,
             sourceEntryTimestamps: prepared.sourceEntryTimestamps,
             maxTurns: runtime.config.agentMaxTurns,
@@ -1194,12 +1198,12 @@ async function runReflectorStage(
       // In manual mode, merge accumulated pending batches with
       // branch data (preserving pre-switch markers).
       const sourceReflections = pending
-        ? [
+        ? withoutReplacedReflections([
             ...folded.reflections,
             ...(pending.reflectionBatches ?? []).flatMap(
               (b: any) => (b.data as any)?.reflections ?? [],
             ),
-          ]
+          ])
         : folded.reflections;
       const sourceObservations = pending
         ? [
@@ -1218,6 +1222,12 @@ async function runReflectorStage(
         Math.floor(runtime.config.reflectorInputMaxTokens * 0.15),
       );
 
+      const memoryLanguage = detectMemoryLanguage(entries);
+      const replaceableReflections = withoutReplacedReflections([
+        ...new Map(
+          [...sourceReflections, ...newReflections].map((r: Reflection) => [r.id, r] as const),
+        ).values(),
+      ]);
       const { runReflector } = await import("./agents/reflector/agent.js");
       const result = await runWorkerAttempt(
         "reflector",
@@ -1235,6 +1245,8 @@ async function runReflectorStage(
             observations: newObservations,
             existingReflectionsSummary: existingReflectionsSummary || undefined,
             existingObservationsSummary: existingObservationsSummary || undefined,
+            replaceableReflections,
+            memoryLanguage,
             maxTurns: runtime.config.agentMaxTurns,
             thinkingLevel: stageThinkingLevel(runtime, "reflector", stageModelForThinking),
             providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
@@ -1501,12 +1513,12 @@ async function runDropperStage(
       // branch data (preserving pre-switch markers), matching the
       // dropper's full autoCompact context.
       const pendingReflections = pending
-        ? [
+        ? withoutReplacedReflections([
             ...folded.reflections,
             ...(pending.reflectionBatches ?? []).flatMap(
               (b: any) => (b.data as any)?.reflections ?? [],
             ),
-          ]
+          ])
         : folded.reflections;
       const reflectionsForDropper = mergeReflections(pendingReflections, sameRunReflections);
 

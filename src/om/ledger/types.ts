@@ -41,6 +41,8 @@ export type Reflection = {
   id: string;
   content: string;
   supportingObservationIds: string[];
+  /** Local D15: earlier reflections this one supersedes; see withoutReplacedReflections. */
+  replacesReflectionIds?: string[];
   tokenCount: number;
 };
 
@@ -115,8 +117,20 @@ export function isReflection(value: unknown): value is Reflection {
     isNonEmptyString(value.content) &&
     !/\r|\n/.test(value.content) &&
     isNonEmptyStringArray(value.supportingObservationIds) &&
+    (value.replacesReflectionIds === undefined ||
+      (Array.isArray(value.replacesReflectionIds) && value.replacesReflectionIds.every(isMemoryId))) &&
     isTokenCount(value.tokenCount)
   );
+}
+
+/**
+ * Local D15: drop reflections that a reflection in the same list replaces.
+ * The ledger keeps replaced reflections (recall still finds them by id); only
+ * active memory views (fold, projections, worker context) hide them.
+ */
+export function withoutReplacedReflections<T extends Reflection>(reflections: readonly T[]): T[] {
+  const replaced = new Set(reflections.flatMap((reflection) => reflection.replacesReflectionIds ?? []));
+  return replaced.size ? reflections.filter((reflection) => !replaced.has(reflection.id)) : [...reflections];
 }
 
 export function isObservationsRecordedData(value: unknown): value is ObservationsRecordedEntryData {

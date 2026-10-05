@@ -21,7 +21,7 @@ function captureLoop(captured:any[], onRequest?:(ctx:any,prompt:any[])=>Promise<
 const noNetwork=()=>{throw new Error('network forbidden');};
 
 test('observer never moves coverage past unseen source entries',async()=>{
-  const entries:any[]=Array.from({length:3},(_,i)=>({id:'s'+i,type:'message',message:{role:'user',content:'中文'.repeat(800),timestamp:0}}));
+  const entries:any[]=Array.from({length:3},(_,i)=>({id:'s'+i,type:'message',message:{role:'user',content:'中文'.repeat(760),timestamp:0}}));
   const seen:string[]=[]; const errors:Error[]=[]; let cursor:any;
   const runtime:any={config:{...DEFAULTS,compaction:'auto',observeAfterTokens:3000,observerChunkMaxTokens:8000},
     isGenerationActive:()=>true,tryEmitWorkerInfo:()=>{},getCursor:()=>cursor,advanceCursor:(_s:any,id:string,state:string)=>{cursor={entryId:id,state};},

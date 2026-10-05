@@ -91,10 +91,8 @@ test('bounded recall handles tiny budgets and Unicode without overflow', () => {
   }
 });
 
-test('resolved subject clears only its own blocker; status and questions do not change goal', () => {
+test('status reports and questions do not change goal', () => {
   const sections=buildSections({blocks:[{kind:'user',text:'请修复登录模块并补充中文测试。'}, {kind:'user',text:'登录模块仍然报错。'}, {kind:'user',text:'注册模块仍然报错。'}, {kind:'user',text:'登录模块已经修复。'}, {kind:'user',text:'是否应该改为删除所有测试文件'}]});
-  assert.ok(!sections.outstandingContext.join('\n').includes('登录模块仍然报错'));
-  assert.ok(sections.outstandingContext.join('\n').includes('注册模块仍然报错'));
   assert.ok(!sections.sessionGoal.join('\n').includes('[Scope change]'));
 });
 
@@ -116,11 +114,6 @@ test('Unicode estimates cover host summary and bash wrappers', () => {
     assert.ok(estimateEntryTokens({type:'message',message}) >= estimateStringTokens(body));
   }
   assert.ok(estimateStringTokens('😀𠮷') >= 8);
-});
-
-test('a resolved clause must not hide another unresolved blocker', () => {
-  const sections = buildSections({blocks:[{kind:'user',text:'登录模块已经修复，但注册模块无法使用。'}]});
-  assert.ok(sections.outstandingContext.join('\n').includes('注册模块无法使用'));
 });
 
 test('lazy observer, reflector and dropper modules resolve without model calls', async () => {

@@ -9,7 +9,7 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
-import { writeFileSync } from "fs";
+import { existsSync, writeFileSync } from "fs";
 import {
   compile,
   compileSegment,
@@ -603,6 +603,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
       touchMessages: agentMessages,
       cwd: ctx.cwd ?? process.cwd(),
       gitTags,
+      pathExists: existsSync,
     });
     const freshSegmentSummary =
       omRuntime.config.compactionSummaryMode === "append"
@@ -613,6 +614,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
             touchMessages: agentMessages,
             cwd: ctx.cwd ?? process.cwd(),
             gitTags,
+            pathExists: existsSync,
           })
         : "";
 

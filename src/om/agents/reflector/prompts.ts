@@ -15,8 +15,8 @@ What to emit:
 - High and critical observations deserve careful review, not automatic reflection. Many high observations are still active working evidence and should remain observations until completed, superseded, or generalized into a durable decision, invariant, or rationale.
 - Ignore low observations unless a repeated pattern across many low observations is itself significant.
 - Do not lightly reword existing reflections. Rewording creates a separate reflection, so only use different wording when the durable meaning is materially different, more specific, or corrects/refines an existing reflection.
-- Do not emit a near-duplicate of an existing reflection with swapped word order or merged sentences. If a candidate reflection would sit next to an existing one and a reader could not tell which one is authoritative, emit nothing — the existing reflection already carries the meaning.
-- Do not emit update-style records or provenance metadata. Reflections are plain durable facts, not patches.
+- Do not emit a near-duplicate of an existing reflection with swapped word order or merged sentences. If a candidate reflection would sit next to an existing one and a reader could not tell which one is authoritative, either emit nothing (the existing reflection already carries the meaning) or replace the existing one as described below.
+- Do not emit update-style records or provenance metadata. Reflections are plain durable facts, not patches: write a replacement as the current fact ("X now does Y"), never as "update to reflection abc".
 - It is fine to emit zero reflections when nothing new is stable enough; in that case do not call the tool and reply briefly.
 - Set complete=true only when the full active observation set has been reviewed and no further reflections remain. Set complete=false when another batch or correction is needed.
 
@@ -43,8 +43,15 @@ Focus on:
 - Completed outcomes future runs must not redo.
 - Durable blockers, invariants, and open decisions that should survive compaction.
 
+Replacing stale or duplicated reflections:
+- Replacing is the only way an existing reflection leaves compacted memory, so on every run also review the existing reflections, even when the new observations are unrelated to them.
+- Replace when existing reflections are stale or duplicated: the state they describe changed, a later decision or correction overrides them, a pending item they describe was completed or abandoned, or two or more of them state the same fact (including the same fact written in two languages).
+- To replace, emit one reflection that states the current fact and list the stale ids in replacesReflectionIds. The replacement must carry everything still true in the reflections it replaces; never replace a reflection merely to reword it.
+- A replacement that only merges or corrects existing reflections may leave supportingObservationIds empty; it inherits the support of the reflections it replaces. Cite new observation ids when they are the evidence for the change.
+- Replaced reflections stay in the ledger and remain retrievable by id; they are hidden only from compacted memory.
+
 Support ids and coverage stewardship:
-- Every reflection must include supportingObservationIds from the current observations list.
+- Every reflection must include supportingObservationIds from the current observations list, except a replacement that only merges or corrects existing reflections.
 - First decide whether the reflection content passes the durable-value bar. Then audit support ids for that already-worthy reflection.
 - supportingObservationIds are a coverage/provenance set and downstream dropper coverage evidence: include all current observation ids whose durable meaning is preserved by the reflection with equivalent fidelity and can later be treated as redundant active-memory detail.
 - supportingObservationIds are not a checklist to cover every observation. Do not add ids merely to improve coverage counts, maximize support ids, maximize strong coverage, or unlock the dropper.
@@ -53,7 +60,7 @@ Support ids and coverage stewardship:
 - Leave observations unsupported when their details are still active working state, too specific to compress safely, or not yet durable enough.
 - Do not include observations whose unique exact detail, current task state, user correction, user constraint, or concrete completion is not captured by the reflection.
 - If no candidate reflection passes the durable-value bar, emit zero reflections even when observations have coverage: none.
-- Never invent observation ids. Proposals with missing, empty, or invalid supportingObservationIds are rejected.
+- Never invent observation or reflection ids. Proposals with invalid supportingObservationIds, or with neither supportingObservationIds nor replacesReflectionIds, are rejected.
 
 User assertions are authoritative. If the observation pool contains both "User stated they use Postgres" and a later "User asked which db they are on", the assertion answers the question — crystallize the assertion, never the question, as the durable fact.
 
